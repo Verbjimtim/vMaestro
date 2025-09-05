@@ -1,22 +1,24 @@
 ﻿using Maestro.Core.Messages;
+using Maestro.Wpf.ViewModels;
 using MediatR;
 
 namespace Maestro.Wpf.Handlers;
 
-public class MaestroFlightUpdatedNotificationHandler(ViewModels.MaestroViewModel viewModel)
-    : INotificationHandler<MaestroFlightUpdatedNotification>
+public class SequenceUpdatedNotificationHandler(MaestroViewModel maestroViewModel)
+    : INotificationHandler<SequenceUpdatedNotification>
 {
-    public Task Handle(MaestroFlightUpdatedNotification notification, CancellationToken _)
+    public Task Handle(SequenceUpdatedNotification notification, CancellationToken _)
     {
-        var selectedAirport = viewModel.SelectedAirport;
-        if (selectedAirport is null)
-            return Task.CompletedTask;
-
-        if (notification.Flight.DestinationIdentifier != selectedAirport.Identifier)
-            return Task.CompletedTask;
-
-        viewModel.UpdateFlight(notification.Flight);
+        UpdateSequenceViewModel(notification.Sequence);
 
         return Task.CompletedTask;
+    }
+
+    void UpdateSequenceViewModel(SequenceMessage sequence)
+    {
+        var sequenceViewModel = maestroViewModel.Sequences
+            .FirstOrDefault(s => s.AirportIdentifier == sequence.AirportIdentifier);
+
+        sequenceViewModel?.UpdateFrom(sequence);
     }
 }

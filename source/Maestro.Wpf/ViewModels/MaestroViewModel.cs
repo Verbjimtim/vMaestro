@@ -1,140 +1,195 @@
 ﻿using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using Maestro.Core.Configuration;
+using Maestro.Core.Extensions;
 using Maestro.Core.Handlers;
-using Maestro.Core.Infrastructure;
 using Maestro.Core.Messages;
 using Maestro.Core.Model;
+using Maestro.Wpf.Integrations;
 using Maestro.Wpf.Messages;
 using MediatR;
 
 namespace Maestro.Wpf.ViewModels;
 
-public partial class MaestroViewModel : ObservableObject
+public partial class MaestroViewModel(IMediator mediator, IErrorReporter errorReporter) : ObservableObject
 {
-    readonly IMediator _mediator;
-    readonly IClock _clock;
-    
     [ObservableProperty]
-    ObservableCollection<AirportViewModel> _availableAirports = [];
+    ObservableCollection<SequenceViewModel> _sequences = [];
 
     [ObservableProperty]
-    [NotifyCanExecuteChangedFor(nameof(OpenDesequencedWindowCommand))]
-    AirportViewModel? _selectedAirport;
+    SequenceViewModel? _selectedSequence;
 
     [ObservableProperty]
-    RunwayModeViewModel? _selectedRunwayMode;
+    bool _isCreatingSlot = false;
 
     [ObservableProperty]
-    ViewConfiguration? _selectedView;
+    SlotCreationReferencePoint _slotCreationReferencePoint = SlotCreationReferencePoint.Before;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(Desequenced))]
-    List<FlightViewModel> _flights = [];
-    
-    public string[] Desequenced => Flights.Where(f => f.State == State.Desequenced).Select(airport => airport.Callsign).ToArray();
+    string[] _slotRunwayIdentifiers = [];
 
-    public MaestroViewModel(IMediator mediator, IClock clock)
+    [ObservableProperty]
+    DateTimeOffset? _firstSlotTime = null;
+
+    [ObservableProperty]
+    DateTimeOffset? _secondSlotTime = null;
+
+    [ObservableProperty]
+    FlightMessage? _selectedFlight = null;
+
+    partial void OnSequencesChanged(ObservableCollection<SequenceViewModel> sequences)
     {
-        _mediator = mediator;
-        _clock = clock;
-    }
-
-    partial void OnAvailableAirportsChanged(ObservableCollection<AirportViewModel> availableAirports)
-    {
-        // Select the first airport if the selected one no longer exists
-        if (SelectedAirport == null || !availableAirports.Any(a => a.Identifier == SelectedAirport.Identifier))
+        // Deselect the sequence if the selected one no longer exists
+        if (SelectedSequence == null || sequences.All(a => a.AirportIdentifier != SelectedSequence.AirportIdentifier))
         {
-            SelectedAirport = availableAirports.FirstOrDefault();
-        }
-    }
-
-    partial void OnSelectedAirportChanged(AirportViewModel? airportViewModel)
-    {
-        if (airportViewModel is null)
-        {
-            SelectedRunwayMode = null;
-            SelectedView = null;
-            return;
-        }
-
-        if (SelectedRunwayMode == null || airportViewModel.RunwayModes.All(r => r.Identifier != SelectedRunwayMode.Identifier))
-        {
-            SelectedRunwayMode = airportViewModel.RunwayModes.FirstOrDefault();
-        }
-
-        if (SelectedView == null || airportViewModel.Views.All(s => s.Identifier != SelectedView.Identifier))
-        {
-            SelectedView = airportViewModel.Views.FirstOrDefault();
-        }
-
-        var response = _mediator.Send(new GetSequenceRequest(airportViewModel.Identifier)).GetAwaiter().GetResult();
-        foreach (var flight in response.Sequence.Flights)
-        {
-            UpdateFlight(flight);
+            SelectedSequence = null;
         }
     }
 
     [RelayCommand]
     async Task LoadConfiguration()
     {
-        var response = await _mediator.Send(new GetAirportConfigurationRequest(), CancellationToken.None);
-
-        AvailableAirports.Clear();
-
-        foreach (var airport in response.Airports)
+        try
         {
-            var runwayModes = airport.RunwayModes.Select(rm =>
-                new RunwayModeViewModel(
-                    rm.Identifier,
-                    rm.Runways.Select(r =>
-                        new RunwayViewModel(r.Identifier, TimeSpan.FromSeconds(r.DefaultLandingRateSeconds)))
-                    .ToArray()))
-                .ToArray();
+            var response = await mediator.Send(new InitializeRequest(), CancellationToken.None);
 
-            AvailableAirports.Add(new AirportViewModel(airport.Identifier, runwayModes, airport.Views));
+            Sequences.Clear();
+            foreach (var item in response.Sequences)
+            {
+                Sequences.Add(new SequenceViewModel(
+                    item.AirportIdentifier,
+                    item.Views,
+                    item.RunwayModes,
+                    item.Sequence,
+                    mediator,
+                    errorReporter));
+            }
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
         }
     }
 
     [RelayCommand]
-    void SelectView(ViewConfiguration? viewConfiguration)
+    async Task MoveFlight(MoveFlightRequest request)
     {
-        SelectedView = viewConfiguration;
-    }
-    
-    [RelayCommand(CanExecute = nameof(CanOpenDesequencedWindow))]
-    void OpenDesequencedWindow() => _mediator.Send(new OpenDesequencedWindowRequest(SelectedAirport!.Identifier, Desequenced));
-    bool CanOpenDesequencedWindow() => SelectedAirport is not null;
-
-    public void UpdateFlight(FlightMessage flight)
-    {
-        var flights = Flights.ToList();
-        var index = flights.FindIndex(f => f.Callsign == flight.Callsign);
-        var viewModel = new FlightViewModel(flight);
-        if (index != -1)
+        try
         {
-            flights[index] = viewModel;
+            await mediator.Send(request);
         }
-        else
+        catch (Exception ex)
         {
-            flights.Add(viewModel);
+            errorReporter.ReportError(ex);
         }
-
-        Flights = flights;
     }
 
-    partial void OnSelectedRunwayModeChanged(RunwayModeViewModel? runwayMode)
+    [RelayCommand]
+    async Task SwapFlights(SwapFlightsRequest request)
     {
-        if (SelectedAirport is null || runwayMode is null)
-            return;
-        
-        // TODO: Ask if runways should be re-assigned
-        _mediator.Send(
-            new ChangeRunwayModeRequest(
-                SelectedAirport.Identifier,
-                runwayMode.Identifier,
-                _clock.UtcNow(),
-                false));
+        try
+        {
+            await mediator.Send(request);
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
+    }
+
+    public void BeginSlotCreation(DateTimeOffset firstSlotTime, SlotCreationReferencePoint slotCreationReferencePoint, string[] runwayIdentifiers)
+    {
+        IsCreatingSlot = true;
+        SlotCreationReferencePoint = slotCreationReferencePoint;
+
+        // Round time based on reference point:
+        // Before: round down to the previous minute
+        // After: round up to the next minute
+        FirstSlotTime = slotCreationReferencePoint == SlotCreationReferencePoint.Before
+            ? new DateTimeOffset(firstSlotTime.Year, firstSlotTime.Month, firstSlotTime.Day,
+                                firstSlotTime.Hour, firstSlotTime.Minute, 0, firstSlotTime.Offset)
+            : new DateTimeOffset(firstSlotTime.Year, firstSlotTime.Month, firstSlotTime.Day,
+                                firstSlotTime.Hour, firstSlotTime.Minute, 0, firstSlotTime.Offset).AddMinutes(1);
+        SlotRunwayIdentifiers = runwayIdentifiers;
+    }
+
+    public void EndSlotCreation(DateTimeOffset secondSlotTime)
+    {
+        IsCreatingSlot = false;
+        SecondSlotTime = secondSlotTime.Rounded();
+
+        var startTime = FirstSlotTime!.Value.IsSameOrBefore(SecondSlotTime.Value) ? FirstSlotTime.Value : SecondSlotTime.Value;
+        var endTime = FirstSlotTime!.Value.IsSameOrBefore(SecondSlotTime.Value) ? SecondSlotTime.Value : FirstSlotTime.Value;
+
+        ShowSlotWindow(startTime, endTime, SlotRunwayIdentifiers);
+    }
+
+    async void ShowSlotWindow(DateTimeOffset startTime, DateTimeOffset endTime, string[] runwayIdentifiers)
+    {
+        try
+        {
+            if (SelectedSequence?.AirportIdentifier == null) return;
+
+            await mediator.Send(new OpenSlotWindowRequest(
+                SelectedSequence.AirportIdentifier,
+                null, // slotId is null for new slots
+                startTime,
+                endTime,
+                runwayIdentifiers));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
+    }
+
+    public async void ShowSlotWindow(SlotMessage slotMessage)
+    {
+        try
+        {
+            if (SelectedSequence?.AirportIdentifier == null)
+                return;
+
+            await mediator.Send(new OpenSlotWindowRequest(
+                SelectedSequence.AirportIdentifier,
+                slotMessage.SlotId,
+                slotMessage.StartTime,
+                slotMessage.EndTime,
+                slotMessage.RunwayIdentifiers));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
+    }
+
+    public void ShowInsertFlightWindow(IInsertFlightOptions options)
+    {
+        try
+        {
+            if (SelectedSequence?.AirportIdentifier == null)
+                return;
+
+            mediator.Send(
+                new OpenInsertFlightWindowRequest(
+                    SelectedSequence.AirportIdentifier,
+                    options,
+                    SelectedSequence.Flights.Where(f => f.State is State.Landed).ToArray(),
+                    SelectedSequence.Flights.Where(f => f.State is State.Pending).ToArray()));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
+    }
+
+    public void SelectFlight(FlightMessage flight)
+    {
+        SelectedFlight = flight;
+    }
+
+    public void DeselectFlight()
+    {
+        SelectedFlight = null;
     }
 }

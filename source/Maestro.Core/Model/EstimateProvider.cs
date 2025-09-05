@@ -43,24 +43,24 @@ public class EstimateProvider(
         var difference = (radarEstimate - systemEstimate).Duration();
         var average = DateTimeOffsetHelpers.Earliest(radarEstimate, systemEstimate)
             .Add(TimeSpan.FromSeconds(difference.TotalSeconds / 2));
-        
+
         return average;
     }
 
     public DateTimeOffset? GetLandingEstimate(Flight flight, DateTimeOffset? systemEstimate)
     {
         // TODO: logging
-        
+
         // We need ETA_FF in order to calculate the landing time using intervals.
         // If we don't have those, defer to the system estimate.
-        if (flight.FeederFixIdentifier is null || 
+        if (flight.FeederFixIdentifier is null ||
             flight.EstimatedFeederFixTime is null)
             return systemEstimate;
 
         var aircraftPerformance = performanceLookup.GetPerformanceDataFor(flight.AircraftType);
         if (aircraftPerformance is null)
             return systemEstimate;
-        
+
         var intervalToRunway = arrivalLookup.GetArrivalInterval(
             flight.DestinationIdentifier,
             flight.FeederFixIdentifier,
@@ -70,14 +70,16 @@ public class EstimateProvider(
         if (intervalToRunway is null)
             return systemEstimate;
 
+        // If the flight has passed the feeder fix but vatSys didn't see it, we'll get a MaxValue for the ATO_FF
+        // In this case, defer to the system estimate
+        if (flight.HasPassedFeederFix && flight.ActualFeederFixTime == DateTimeOffset.MaxValue)
+            return systemEstimate;
+
         var feederFixTime = flight.HasPassedFeederFix
-            ? flight.ActualFeederFixTime == DateTime.MaxValue // vatSys uses MaxValue if the flight has passed the FF but the specific time is not known (I.e: Controller connected after flight passed FF)
-                ? systemEstimate // Defer to system estimate if ATO_FF is unavailable
-                : flight.ActualFeederFixTime // Prefer ATO_FF if available
+            ? flight.ActualFeederFixTime // Prefer ATO_FF if available
             : flight.EstimatedFeederFixTime; // Use ETA_FF if not passed FF
 
         var landingEstimateFromInterval = feederFixTime?.Add(intervalToRunway.Value);
-
         return landingEstimateFromInterval;
 
         // TODO: Calculate landing estimate based on flight trajectory
@@ -112,7 +114,7 @@ public class EstimateProvider(
         //                 }
         //             }
         //             break;
-        //             
+        //
         //         case FlowControls.S250:
         //             if(lastPos.Altitude > 10000)
         //             {

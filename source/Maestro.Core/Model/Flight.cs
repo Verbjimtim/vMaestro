@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using Maestro.Core.Configuration;
+using Maestro.Core.Extensions;
 using Maestro.Core.Infrastructure;
 
 namespace Maestro.Core.Model;
@@ -6,104 +7,87 @@ namespace Maestro.Core.Model;
 public sealed class FlightComparer : IComparer<Flight>
 {
     public static FlightComparer Instance { get; } = new();
-    
+
     public int Compare(Flight? left, Flight? right)
     {
         if (left is null)
             return -1;
-            
+
         if (right is null)
             return 1;
-        
-        var timeComparison = left.ScheduledLandingTime.CompareTo(right.ScheduledLandingTime);
-        if (timeComparison != 0)
-            return timeComparison;
-        
-        // Compare by state descending
-        var stateComparison = right.State.CompareTo(left.State);
-        if (stateComparison != 0)
-            return stateComparison;
-        
-        // To prevent two flights from sharing the same position if they have the same state, estimate, and scheduled
-        // times, use their callsigns to differentiate.
-        return string.Compare(left.Callsign, right.Callsign, StringComparison.Ordinal);
+
+        return left.ScheduledLandingTime.CompareTo(right.ScheduledLandingTime);
     }
 }
 
 public class Flight : IEquatable<Flight>, IComparable<Flight>
 {
-    public Flight(
-        string callsign,
-        string aircraftType,
-        WakeCategory wakeCategory,
-        string originIdentifier,
-        string destinationIdentifier,
-        string assignedRunwayIdentifier,
-        FixEstimate? feederFixEstimate,
-        DateTimeOffset initialLandingTime)
+    public Flight(string callsign, string destinationIdentifier, DateTimeOffset initialLandingEstimate)
     {
         Callsign = callsign;
-        AircraftType = aircraftType;
-        WakeCategory = wakeCategory;
-        OriginIdentifier = originIdentifier;
         DestinationIdentifier = destinationIdentifier;
-        AssignedRunwayIdentifier = assignedRunwayIdentifier;
-
-        FeederFixIdentifier = feederFixEstimate?.FixIdentifier;
-        InitialFeederFixTime = feederFixEstimate?.Estimate;
-        EstimatedFeederFixTime = feederFixEstimate?.Estimate;
-        ScheduledFeederFixTime = feederFixEstimate?.Estimate;
-        
-        InitialLandingTime = initialLandingTime;
-        EstimatedLandingTime = initialLandingTime;
-        ScheduledLandingTime = initialLandingTime;
+        State = State.New;
+        UpdateLandingEstimate(initialLandingEstimate);
     }
 
-    public string Callsign { get; private set; }
-    public string AircraftType { get; private set; }
-    public WakeCategory WakeCategory { get; private set; }
-    public string OriginIdentifier { get; private set; }
-    public string DestinationIdentifier { get; private set; }
-    public string? AssignedArrivalIdentifier { get; private set; }
-    public string AssignedRunwayIdentifier { get; private set; }
-    public bool RunwayManuallyAssigned { get; private set; }
-    public bool HighPriority { get; set; } = false;
-    public bool NoDelay { get; set; }
-    public bool NeedsRecompute { get; set; }
+    public string Callsign { get; }
+    public string? AircraftType { get; set; }
+    public WakeCategory? WakeCategory { get; set; }
+    public string? OriginIdentifier { get; set; }
+    public string DestinationIdentifier { get; }
+    public DateTimeOffset? EstimatedDepartureTime { get; set; }
+    public TimeSpan? EstimatedTimeEnroute { get; set; }
 
-    public State State { get; private set; } = State.Unstable;
-    public bool PositionIsFixed => State is not State.Unstable and not State.Stable;
+    public bool IsFromDepartureAirport { get; set; }
+
+    // TODO: Consider storing the minimum separation required here
+    // Either that or store the runway mode here so we can easily reference it later
+    public string? AssignedRunwayIdentifier { get; private set; }
+    public bool RunwayManuallyAssigned { get; private set; }
+
+    public State State { get; private set; }
+    public bool HighPriority { get; set; }
+    public bool NoDelay { get; set; }
+    public bool Activated => IsActiveState(State);
+    public DateTimeOffset? ActivatedTime { get; private set; }
 
     public string? FeederFixIdentifier { get; private set; }
     public DateTimeOffset? InitialFeederFixTime { get; private set; }
     public DateTimeOffset? EstimatedFeederFixTime { get; private set; } // ETA_FF
+    public bool ManualFeederFixEstimate { get; private set; }
     public DateTimeOffset? ScheduledFeederFixTime { get; private set; } // STA_FF
-    public DateTimeOffset? ActualFeederFixTime { get; private set; }
+    public DateTimeOffset? ActualFeederFixTime { get; private set; } // ATO_FF
     public bool HasPassedFeederFix => ActualFeederFixTime is not null;
 
     public DateTimeOffset InitialLandingTime { get; private set; }
     public DateTimeOffset EstimatedLandingTime { get; private set; } // ETA
     public DateTimeOffset ScheduledLandingTime { get; private set; } // STA
+    public bool ManualLandingTime { get; private set; }
+
     public TimeSpan TotalDelay => ScheduledLandingTime - InitialLandingTime;
     public TimeSpan RemainingDelay => ScheduledLandingTime - EstimatedLandingTime;
-    
-    public bool Activated => ActivatedTime.HasValue;
-    public DateTimeOffset? ActivatedTime { get; private set; }
-    
-    public FlowControls FlowControls { get; private set; } = FlowControls.ProfileSpeed;
-    
-    public bool HasBeenScheduled { get; private set; }
-    
-    public DateTimeOffset LastSeen { get; private set; }
 
-    public void SetState(State state)
+    public FlowControls FlowControls { get; private set; } = FlowControls.ProfileSpeed;
+
+    public string? AssignedArrivalIdentifier { get; set; }
+    public FixEstimate[] Fixes { get; set; } = [];
+    public DateTimeOffset LastSeen { get; private set; }
+    public FlightPosition? Position { get; private set; }
+    public bool IsDummy { get; init; }
+
+    public void SetState(State state, IClock clock)
     {
         if (State == State.Removed && state is not State.Removed)
             throw new MaestroException("Cannot change state as flight has been removed.");
-        
+
+        if (!IsActiveState(State) && IsActiveState(state))
+            ActivatedTime = clock.UtcNow();
+
         // TODO: Prevent invalid state changes
         State = state;
     }
+
+    bool IsActiveState(State state) => state is State.Unstable or State.Stable or State.SuperStable or State.Frozen or State.Landed;
 
     public void Resume()
     {
@@ -119,14 +103,7 @@ public class Flight : IEquatable<Flight>, IComparable<Flight>
     {
         State = State.Removed;
     }
-    
-    public bool ShouldSequence => State != State.Desequenced && State != State.Removed;
 
-    public void SetArrival(string? arrivalIdentifier)
-    {
-        AssignedArrivalIdentifier = arrivalIdentifier;
-    }
-    
     public void SetRunway(string runwayIdentifier, bool manual)
     {
         AssignedRunwayIdentifier = runwayIdentifier;
@@ -145,21 +122,19 @@ public class Flight : IEquatable<Flight>, IComparable<Flight>
     {
         FeederFixIdentifier = feederFixIdentifier;
         EstimatedFeederFixTime = feederFixEstimate;
+        InitialFeederFixTime = feederFixEstimate;
         ScheduledFeederFixTime = feederFixEstimate;
         ActualFeederFixTime = actualFeederFixTime;
     }
 
-    public void UpdateFeederFixEstimate(DateTimeOffset feederFixEstimate)
+    public void UpdateFeederFixEstimate(DateTimeOffset feederFixEstimate, bool manual = false)
     {
         if (string.IsNullOrEmpty(FeederFixIdentifier))
             throw new MaestroException("No feeder fix has been set");
 
-        if (HasPassedFeederFix)
-            throw new MaestroException(
-                "Cannot update feeder fix estimate because the flight has already passed the feeder fix");
-        
         EstimatedFeederFixTime = feederFixEstimate;
-        if (State == State.Unstable)
+        ManualFeederFixEstimate = manual;
+        if (State is State.Pending or State.New or State.Unstable)
         {
             InitialFeederFixTime = feederFixEstimate;
         }
@@ -173,7 +148,7 @@ public class Flight : IEquatable<Flight>, IComparable<Flight>
         if (HasPassedFeederFix)
             throw new MaestroException(
                 "Cannot update feeder fix time because the flight has already passed the feeder fix");
-        
+
         ScheduledFeederFixTime = feederFixTime;
     }
 
@@ -184,38 +159,109 @@ public class Flight : IEquatable<Flight>, IComparable<Flight>
 
         if (HasPassedFeederFix)
             throw new MaestroException("Flight has already passed the feeder fix");
-        
+
         ActualFeederFixTime = feederFixTime;
     }
 
     public void UpdateLandingEstimate(DateTimeOffset landingEstimate)
     {
         EstimatedLandingTime = landingEstimate;
-        if (State == State.Unstable)
+        if (State is State.Pending or State.New or State.Unstable)
         {
             InitialLandingTime = landingEstimate;
         }
     }
 
-    public void SetLandingTime(DateTimeOffset landingTime)
+    public void ResetInitialLandingEstimate()
     {
-        HasBeenScheduled = true;
-        ScheduledLandingTime = landingTime;
+        InitialLandingTime = EstimatedLandingTime;
     }
 
-    public void Activate(IClock clock)
+    public void ResetInitialFeederFixEstimate()
     {
-        if (Activated)
-            throw new MaestroException($"{Callsign} is already activated.");
-        
-        ActivatedTime = clock.UtcNow();
+        InitialFeederFixTime = EstimatedFeederFixTime;
+    }
+
+    public void SetLandingTime(DateTimeOffset landingTime, bool manual = false)
+    {
+        ScheduledLandingTime = landingTime;
+        ManualLandingTime = manual;
     }
 
     public void UpdateLastSeen(IClock clock)
     {
         LastSeen = clock.UtcNow();
     }
-    
+
+    public void UpdatePosition(FlightPosition? position)
+    {
+        Position = position;
+    }
+
+    public void MakePending()
+    {
+        // TODO: Prevent if the flight has departed
+        // Only allowed between Preactive and Departure
+
+        ActivatedTime = null;
+        EstimatedFeederFixTime = null;
+        InitialFeederFixTime = null;
+        ScheduledFeederFixTime = null;
+        EstimatedLandingTime = default;
+        InitialLandingTime = default;
+        ScheduledLandingTime = default;
+        ManualLandingTime = false;
+        State = State.Pending;
+    }
+
+    public void UpdateStateBasedOnTime(IClock clock)
+    {
+        // Sticky states
+        if (State is State.Pending or State.Landed or State.Desequenced or State.Removed)
+            return;
+
+        // TODO: Make configurable
+        var stableThreshold = TimeSpan.FromMinutes(25);
+        var frozenThreshold = TimeSpan.FromMinutes(15);
+        var minUnstableTime = TimeSpan.FromSeconds(180);
+
+        // Keep the flight unstable until it's passed the minimum unstable time
+        var timeActive = clock.UtcNow() - ActivatedTime;
+        if (State is State.Unstable && timeActive <= minUnstableTime)
+        {
+            return;
+        }
+
+        var now = clock.UtcNow();
+        if (ScheduledLandingTime.IsSameOrBefore(now))
+        {
+            SetState(State.Landed, clock);
+            return;
+        }
+
+        var timeToLanding = ScheduledLandingTime - clock.UtcNow();
+        if (timeToLanding <= frozenThreshold)
+        {
+            SetState(State.Frozen, clock);
+            return;
+        }
+
+        if (InitialFeederFixTime is not null && InitialFeederFixTime.Value.IsSameOrBefore(now))
+        {
+            SetState(State.SuperStable, clock);
+            return;
+        }
+
+        var timeToFeeder = EstimatedFeederFixTime - clock.UtcNow();
+        if (timeToFeeder <= stableThreshold)
+        {
+            SetState(State.Stable, clock);
+            return;
+        }
+
+        SetState(State.Unstable, clock);
+    }
+
     public int CompareTo(Flight? other)
     {
         return FlightComparer.Instance.Compare(this, other);
@@ -223,7 +269,7 @@ public class Flight : IEquatable<Flight>, IComparable<Flight>
 
     public bool Equals(Flight? other)
     {
-        return other is not null && (ReferenceEquals(this, other) || Callsign == other.Callsign); 
+        return other is not null && (ReferenceEquals(this, other) || Callsign == other.Callsign);
     }
 
     public override string ToString()
@@ -235,5 +281,5 @@ public class Flight : IEquatable<Flight>, IComparable<Flight>
 public enum FlowControls
 {
     ProfileSpeed,
-    S250
+    ReduceSpeed
 }

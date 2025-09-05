@@ -1,8 +1,8 @@
 ﻿<UserControl x:Class="Maestro.Wpf.Views.MaestroView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
-             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:local="clr-namespace:Maestro.Wpf"
              xmlns:behaviors="http://schemas.microsoft.com/xaml/behaviors"
              xmlns:controls="clr-namespace:Maestro.Wpf.Controls"
@@ -16,7 +16,7 @@
              d:DesignWidth="560">
     <behaviors:Interaction.Triggers>
         <behaviors:EventTrigger
-            EventName="Loaded" 
+            EventName="Loaded"
             SourceObject="{Binding RelativeSource={RelativeSource Mode=FindAncestor, AncestorType=UserControl}}">
             <behaviors:InvokeCommandAction Command="{Binding LoadConfigurationCommand}"/>
         </behaviors:EventTrigger>
@@ -27,12 +27,11 @@
                 <ResourceDictionary Source="/Maestro.Wpf;component/Styles.xaml" />
             </ResourceDictionary.MergedDictionaries>
 
-            <converters:TotalSecondsConverter x:Key="TotalSecondsConverter" />
             <converters:RunwaysToLadderTitleConverter x:Key="RunwaysToLadderTitleConverter" />
             <converters:FeederFixesToLadderTitleConverter x:Key="FeederFixesToLadderTitleConverter" />
-            <converters:HasItemsConverter x:Key="HasItemsConverter" />
+            <converters:EqualityConverter x:Key="EqualityConverter" />
 
-            <Style TargetType="{x:Type TextBlock}" BasedOn="{StaticResource TextBaseStyle}" />
+            <Style TargetType="{x:Type TextBlock}" BasedOn="{StaticResource GenericTextStyle}" />
             <Style TargetType="{x:Type Button}" BasedOn="{StaticResource ButtonBaseStyle}" />
 
         </ResourceDictionary>
@@ -52,25 +51,10 @@
             <RowDefinition Height="32" />
         </Grid.RowDefinitions>
 
-        <!-- Unknown Buttons -->
-        <!-- TODO: Not implemented -->
-        <Grid Grid.Column="0" Grid.Row="0" Grid.RowSpan="3">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="*" />
-                <RowDefinition Height="*" />
-            </Grid.RowDefinitions>
-
-            <Button Grid.Row="0" Margin="0,0,0,1" IsEnabled="False">
-                <controls:Chevron Direction="Left" />
-            </Button>
-            <Button Grid.Row="1" Margin="0,1,0,1" IsEnabled="False">
-                <controls:Chevron Direction="Right" />
-            </Button>
-        </Grid>
-
         <!-- Header -->
-        <controls:BeveledBorder 
-            Grid.Column="1"
+        <controls:BeveledBorder
+            Grid.Column="0"
+            Grid.ColumnSpan="2"
             Grid.Row="0"
             BevelType="Outline"
             BorderThickness="{x:Static local:Theme.BeveledBorderThickness}"
@@ -89,7 +73,7 @@
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="56" />
                     <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="72" />
+                    <ColumnDefinition MinWidth="72" Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
@@ -102,7 +86,7 @@
                     VerticalAlignment="Center"
                     TextWrapping="Wrap"
                     HorizontalAlignment="Center"
-                    Style="{StaticResource MultiLineText}">
+                    Style="{StaticResource GenericTextStyle}">
                         FLOW
                 </TextBlock>
 
@@ -112,25 +96,35 @@
                 <ComboBox
                     Grid.Column="2"
                     Padding="5"
-                    ItemsSource="{Binding Path=AvailableAirports, UpdateSourceTrigger=PropertyChanged}"
-                    SelectedItem="{Binding Path=SelectedAirport, UpdateSourceTrigger=PropertyChanged}"
-                    DisplayMemberPath="Identifier" />
+                    ItemsSource="{Binding Path=Sequences, UpdateSourceTrigger=PropertyChanged}"
+                    SelectedItem="{Binding Path=SelectedSequence, UpdateSourceTrigger=PropertyChanged}"
+                    DisplayMemberPath="AirportIdentifier" />
 
                 <controls:BeveledLine Grid.Column="3" Width="{x:Static local:Theme.BeveledLineWidth}" Orientation="Vertical"/>
 
                 <!-- Runway Selector -->
-                <ComboBox
+                <Button
                     Grid.Column="4"
                     Padding="5"
-                    ItemsSource="{Binding Path=SelectedAirport.RunwayModes}"
-                    SelectedItem="{Binding Path=SelectedRunwayMode}"
-                    DisplayMemberPath="Identifier" />
+                    Command="{Binding SelectedSequence.OpenTerminalConfigurationCommand}">
+                    <TextBlock TextWrapping="Wrap" Text="{Binding SelectedSequence.TerminalConfiguration}">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock" BasedOn="{StaticResource InteractiveTextStyle}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding SelectedSequence.RunwayChangeIsPlanned}" Value="True">
+                                        <Setter Property="Foreground" Value="White" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </Button>
 
                 <controls:BeveledLine Grid.Column="5" Width="{x:Static local:Theme.BeveledLineWidth}" Orientation="Vertical"/>
 
                 <!-- Runway Intervals -->
                 <controls:BeveledBorder Grid.Column="6" BorderThickness="{x:Static local:Theme.BeveledBorderThickness}" BevelType="Raised">
-                    <ItemsControl ItemsSource="{Binding Path=SelectedRunwayMode.Runways}" VerticalAlignment="Center" Margin="2">
+                    <ItemsControl ItemsSource="{Binding Path=SelectedSequence.CurrentRunwayMode.Runways}" VerticalAlignment="Center" Margin="2">
                         <ItemsControl.ItemsPanel>
                             <ItemsPanelTemplate>
                                 <WrapPanel />
@@ -141,16 +135,16 @@
                                 <DataTemplate.Resources>
                                     <Style TargetType="{x:Type TextBlock}" BasedOn="{StaticResource InteractiveTextStyle}"/>
                                 </DataTemplate.Resources>
-                                
+
                                 <StackPanel Orientation="Horizontal">
                                     <TextBlock x:Name="Separator" Text=" - " />
                                     <TextBlock Text="{Binding Identifier}"/>
                                     <TextBlock>:</TextBlock>
-                                    <TextBlock Text="{Binding LandingRate, Converter={StaticResource TotalSecondsConverter}}"/>
+                                    <TextBlock Text="{Binding LandingRateSeconds}"/>
                                 </StackPanel>
 
                                 <DataTemplate.Triggers>
-                                    
+
                                     <!-- Hide the separator on the first iteration -->
                                     <DataTrigger Binding="{Binding RelativeSource={RelativeSource PreviousData}}" Value="{x:Null}">
                                         <Setter Property="Visibility" TargetName="Separator" Value="Collapsed"/>
@@ -174,8 +168,9 @@
         </controls:BeveledBorder>
 
         <!-- Tab Bar -->
-        <StackPanel 
-            Grid.Column="1"
+        <StackPanel
+            Grid.Column="0"
+            Grid.ColumnSpan="2"
             Grid.Row="2"
             Orientation="Horizontal"
             Margin="2">
@@ -185,24 +180,27 @@
                     <Setter Property="Width" Value="48" />
                 </Style>
             </StackPanel.Resources>
-            
-            <Button Content="DEPS" IsEnabled="False" Style="{StaticResource TabBarButtonStyle}"/>
+
+            <Button Content="DEPS" Command="{Binding SelectedSequence.OpenPendingDeparturesWindowCommand}" Style="{StaticResource TabBarButtonStyle}"/>
             <Button Content="COORD" IsEnabled="False" Style="{StaticResource TabBarButtonStyle}" />
-            <Button Content="DESQ" IsEnabled="True" Command="{Binding OpenDesequencedWindowCommand}">
-                <Button.Style>
-                    <Style TargetType="Button" BasedOn="{StaticResource TabBarButtonStyle}">
-                        <Style.Triggers>
-                            <DataTrigger Binding="{Binding Desequenced, Converter={StaticResource HasItemsConverter}}" Value="True">
-                                <Setter Property="Foreground" Value="White" />
-                            </DataTrigger>
-                        </Style.Triggers>
-                    </Style>
-                </Button.Style>
+            <Button Command="{Binding SelectedSequence.OpenDesequencedWindowCommand}" Style="{StaticResource TabBarButtonStyle}">
+                <TextBlock Text="DESQ">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource InteractiveTextStyle}">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding SelectedSequence.HasDesequencedFlight}" Value="True">
+                                    <Setter Property="Foreground" Value="White" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
             </Button>
 
-            <ItemsControl ItemsSource="{Binding SelectedAirport.Views}" Name="SectorList">
+            <ItemsControl ItemsSource="{Binding SelectedSequence.Views}" Name="SectorList">
                 <ItemsControl.Resources>
                     <Style TargetType="{x:Type Button}" BasedOn="{StaticResource ButtonBaseStyle}">
+                        <Setter Property="Margin" Value="0,0,2,0"/>
                         <Setter Property="Width" Value="72" />
                     </Style>
                 </ItemsControl.Resources>
@@ -213,7 +211,24 @@
                 </ItemsControl.ItemsPanel>
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
-                        <Button Command="{Binding Path=DataContext.SelectViewCommand, ElementName=SectorList}" CommandParameter="{Binding}" Content="{Binding Identifier}" />
+                        <Button Command="{Binding Path=DataContext.SelectedSequence.SelectViewCommand, ElementName=SectorList}" CommandParameter="{Binding}" Content="{Binding Identifier}">
+                            <Button.Style>
+                                <Style TargetType="{x:Type Button}" BasedOn="{StaticResource ButtonBaseStyle}">
+                                    <Setter Property="Width" Value="72" />
+                                    <Style.Triggers>
+                                        <DataTrigger Value="True">
+                                            <DataTrigger.Binding>
+                                                <MultiBinding Converter="{StaticResource EqualityConverter}">
+                                                    <Binding />
+                                                    <Binding Path="DataContext.SelectedSequence.SelectedView" RelativeSource="{RelativeSource AncestorType=ItemsControl}" />
+                                                </MultiBinding>
+                                            </DataTrigger.Binding>
+                                            <Setter Property="Foreground" Value="White" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
@@ -221,7 +236,7 @@
 
         <!-- Scroll Bar -->
         <!-- TODO: Not implemented -->
-        <Grid Grid.Column="0" Grid.Row="3">
+        <Grid Grid.Column="0" Grid.Row="3" Margin="2,0,0,0">
             <Grid.RowDefinitions>
                 <RowDefinition Height="*"/>
                 <RowDefinition Height="*"/>
@@ -241,9 +256,42 @@
         <Canvas
             Grid.Column="1"
             Grid.Row="3"
-            Name="LadderCanvas" 
+            Name="LadderCanvas"
             Margin="1"
-            ClipToBounds="True" />
+            ClipToBounds="True"
+            Background="Transparent"
+            ContextMenuOpening="OnContextMenuOpening"
+            MouseRightButtonDown="OnCanvasRightClick"
+            MouseLeftButtonDown="OnCanvasLeftClick">
+            <Canvas.ContextMenu>
+                <ContextMenu>
+                    <ContextMenu.Style>
+                        <Style TargetType="ContextMenu" BasedOn="{StaticResource {x:Type ContextMenu}}">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsCreatingSlot}" Value="True">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ContextMenu.Style>
+                    <MenuItem Header="Insert Flight" Click="InsertFlight"/>
+                    <MenuItem Header="Insert Slot">
+                        <MenuItem Header="Before" Click="BeginInsertingSlotBefore"/>
+                        <MenuItem Header="After" Click="BeginInsertingSlotAfter"/>
+                        <MenuItem.Style>
+                            <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding SelectedSequence.SelectedView.ViewMode}" Value="Approach">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </MenuItem.Style>
+                    </MenuItem>
+                </ContextMenu>
+            </Canvas.ContextMenu>
+        </Canvas>
 
         <!-- Footer -->
         <Grid Grid.Column="1" Grid.Row="4">
@@ -254,26 +302,25 @@
             </Grid.ColumnDefinitions>
 
             <StackPanel Grid.Column="0" Orientation="Vertical" HorizontalAlignment="Right" Margin="0,0,12,0">
-                
                 <TextBlock TextAlignment="Right">
                     <TextBlock.Style>
-                        <Style TargetType="TextBlock" BasedOn="{StaticResource TextBaseStyle}">
-                            <Setter Property="Text" Value="{Binding Path=SelectedView.LeftLadder, Converter={StaticResource RunwaysToLadderTitleConverter}}"/>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource GenericTextStyle}">
+                            <Setter Property="Text" Value="{Binding Path=SelectedSequence.SelectedView.LeftLadder, Converter={StaticResource RunwaysToLadderTitleConverter}}"/>
                             <Style.Triggers>
-                                <DataTrigger Binding="{Binding SelectedView.ViewMode}" Value="Enroute">
+                                <DataTrigger Binding="{Binding SelectedSequence.SelectedView.ViewMode}" Value="Enroute">
                                     <Setter Property="Text" Value="All Runways"/>
                                 </DataTrigger>
                             </Style.Triggers>
                         </Style>
                     </TextBlock.Style>
                 </TextBlock>
-                
+
                 <TextBlock TextAlignment="Right">
                     <TextBlock.Style>
-                        <Style TargetType="TextBlock" BasedOn="{StaticResource TextBaseStyle}">
-                            <Setter Property="Text" Value="{Binding Path=SelectedView.LeftLadder, Converter={StaticResource FeederFixesToLadderTitleConverter}}"/>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource GenericTextStyle}">
+                            <Setter Property="Text" Value="{Binding Path=SelectedSequence.SelectedView.LeftLadder, Converter={StaticResource FeederFixesToLadderTitleConverter}}"/>
                             <Style.Triggers>
-                                <DataTrigger Binding="{Binding SelectedView.ViewMode}" Value="Approach">
+                                <DataTrigger Binding="{Binding SelectedSequence.SelectedView.ViewMode}" Value="Approach">
                                     <Setter Property="Text" Value="All Feeders"/>
                                 </DataTrigger>
                             </Style.Triggers>
@@ -287,33 +334,33 @@
             </controls:BeveledBorder>
 
             <StackPanel Grid.Column="2" HorizontalAlignment="Left" Margin="12,0,0,0">
-                
+
                 <TextBlock TextAlignment="Left">
                     <TextBlock.Style>
-                        <Style TargetType="TextBlock" BasedOn="{StaticResource TextBaseStyle}">
-                            <Setter Property="Text" Value="{Binding Path=SelectedView.RightLadder, Converter={StaticResource RunwaysToLadderTitleConverter}}"/>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource GenericTextStyle}">
+                            <Setter Property="Text" Value="{Binding Path=SelectedSequence.SelectedView.RightLadder, Converter={StaticResource RunwaysToLadderTitleConverter}}"/>
                             <Style.Triggers>
-                                <DataTrigger Binding="{Binding SelectedView.ViewMode}" Value="Enroute">
+                                <DataTrigger Binding="{Binding SelectedSequence.SelectedView.ViewMode}" Value="Enroute">
                                     <Setter Property="Text" Value="All Runways"/>
                                 </DataTrigger>
                             </Style.Triggers>
                         </Style>
                     </TextBlock.Style>
                 </TextBlock>
-                
+
                 <TextBlock TextAlignment="Left">
                     <TextBlock.Style>
-                        <Style TargetType="TextBlock" BasedOn="{StaticResource TextBaseStyle}">
-                            <Setter Property="Text" Value="{Binding Path=SelectedView.RightLadder, Converter={StaticResource FeederFixesToLadderTitleConverter}}"/>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource GenericTextStyle}">
+                            <Setter Property="Text" Value="{Binding Path=SelectedSequence.SelectedView.RightLadder, Converter={StaticResource FeederFixesToLadderTitleConverter}}"/>
                             <Style.Triggers>
-                                <DataTrigger Binding="{Binding SelectedView.ViewMode}" Value="Approach">
+                                <DataTrigger Binding="{Binding SelectedSequence.SelectedView.ViewMode}" Value="Approach">
                                     <Setter Property="Text" Value="All Feeders"/>
                                 </DataTrigger>
                             </Style.Triggers>
                         </Style>
                     </TextBlock.Style>
                 </TextBlock>
-                
+
             </StackPanel>
         </Grid>
     </Grid>

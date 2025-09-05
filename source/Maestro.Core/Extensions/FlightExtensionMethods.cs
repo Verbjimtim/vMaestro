@@ -13,7 +13,9 @@ public static class FlightExtensionMethods
             AircraftType = flight.AircraftType,
             WakeCategory = flight.WakeCategory,
             OriginIdentifier = flight.OriginIdentifier,
+            EstimatedDepartureTime = flight.EstimatedDepartureTime,
             DestinationIdentifier = flight.DestinationIdentifier,
+            IsFromDepartureAirport = flight.IsFromDepartureAirport,
             State = flight.State,
             NumberInSequence = sequence.NumberInSequence(flight),
             FeederFixIdentifier = flight.FeederFixIdentifier,
@@ -27,7 +29,8 @@ public static class FlightExtensionMethods
             LandingTime = flight.ScheduledLandingTime,
             InitialDelay = flight.TotalDelay,
             RemainingDelay = flight.RemainingDelay,
-            FlowControls = flight.FlowControls
+            FlowControls = flight.FlowControls,
+            IsDummy = flight.IsDummy,
         };
     }
 }

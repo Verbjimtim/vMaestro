@@ -6,9 +6,30 @@ public static class DateTimeOffsetExtensionMethods
     {
         return left < right;
     }
+    public static bool IsSameOrBefore(this DateTimeOffset left, DateTimeOffset right)
+    {
+        return left <= right;
+    }
 
     public static bool IsAfter(this DateTimeOffset left, DateTimeOffset right)
     {
         return left > right;
+    }
+
+    public static bool IsSameOrAfter(this DateTimeOffset left, DateTimeOffset right)
+    {
+        return left >= right;
+    }
+
+    public static DateTimeOffset Rounded(this DateTimeOffset time)
+    {
+        return new DateTimeOffset(
+            time.Year,
+            time.Month,
+            time.Day,
+            time.Hour,
+            time.Minute,
+            0,
+            time.Offset);
     }
 }

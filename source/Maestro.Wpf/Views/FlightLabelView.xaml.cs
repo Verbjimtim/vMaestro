@@ -14,11 +14,18 @@ public partial class FlightLabelView : UserControl
         nameof(LadderPosition),
         typeof(LadderPosition),
         typeof(FlightLabelView));
-    
+
     public static readonly DependencyProperty ViewModeProperty = DependencyProperty.Register(
         nameof(ViewMode),
         typeof(ViewMode),
         typeof(FlightLabelView));
+
+    public static readonly DependencyProperty IsDraggableProperty = DependencyProperty.Register(
+        nameof(IsDraggable), typeof(bool), typeof(FlightLabelView), new PropertyMetadata(true));
+
+    public static readonly DependencyProperty IsDraggingProperty = DependencyProperty.Register(
+        nameof(IsDragging), typeof(bool), typeof(FlightLabelView), new PropertyMetadata(false));
+
 
     public LadderPosition LadderPosition
     {
@@ -31,7 +38,19 @@ public partial class FlightLabelView : UserControl
         get => (ViewMode)GetValue(ViewModeProperty);
         set => SetValue(ViewModeProperty, value);
     }
-    
+
+    public bool IsDraggable
+    {
+        get => (bool)GetValue(IsDraggableProperty);
+        set => SetValue(IsDraggableProperty, value);
+    }
+
+    public bool IsDragging
+    {
+        get => (bool)GetValue(IsDraggingProperty);
+        set => SetValue(IsDraggingProperty, value);
+    }
+
     public FlightLabelView()
     {
         InitializeComponent();

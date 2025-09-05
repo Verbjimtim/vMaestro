@@ -107,13 +107,13 @@ public class ArrivalLookupTests
             Runways = [],
             RunwayModes = [],
             Views = [],
-            RunwayAssignmentRules = []
+            DepartureAirports = []
         };
-        
+
         _airportConfigurationProvider = Substitute.For<IAirportConfigurationProvider>();
         _airportConfigurationProvider.GetAirportConfigurations().Returns([airportConfiguration]);
     }
-    
+
     [Theory]
     [InlineData("DH8D", AircraftCategory.NonJet)]
     [InlineData("SF34", AircraftCategory.NonJet)]
@@ -125,7 +125,7 @@ public class ArrivalLookupTests
         var arrivalLookup = new ArrivalLookup(
             _airportConfigurationProvider,
             Substitute.For<ILogger>());
-        
+
         // Act
         var interval = arrivalLookup.GetArrivalInterval(
             "YZZZ",
@@ -151,7 +151,7 @@ public class ArrivalLookupTests
         var arrivalLookup = new ArrivalLookup(
             _airportConfigurationProvider,
             Substitute.For<ILogger>());
-        
+
         // Act
         var interval = arrivalLookup.GetArrivalInterval(
             "YZZZ",
@@ -177,7 +177,7 @@ public class ArrivalLookupTests
         var arrivalLookup = new ArrivalLookup(
             _airportConfigurationProvider,
             Substitute.For<ILogger>());
-        
+
         // Act
         var jetInterval = arrivalLookup.GetArrivalInterval(
             "YZZZ",
@@ -190,7 +190,7 @@ public class ArrivalLookupTests
                 AircraftCategory = AircraftCategory.Jet,
                 WakeCategory = WakeCategory.Medium
             });
-        
+
         var nonJetInterval = arrivalLookup.GetArrivalInterval(
             "YZZZ",
             "ABCDE",
@@ -215,7 +215,7 @@ public class ArrivalLookupTests
         var arrivalLookup = new ArrivalLookup(
             _airportConfigurationProvider,
             Substitute.For<ILogger>());
-        
+
         // Act
         var jetInterval = arrivalLookup.GetArrivalInterval(
             "YZZZ",
@@ -228,7 +228,7 @@ public class ArrivalLookupTests
                 AircraftCategory = AircraftCategory.Jet,
                 WakeCategory = WakeCategory.Medium
             });
-        
+
         var dash8Interval = arrivalLookup.GetArrivalInterval(
             "YZZZ",
             "ABCDE",
@@ -240,7 +240,7 @@ public class ArrivalLookupTests
                 AircraftCategory = AircraftCategory.NonJet,
                 WakeCategory = WakeCategory.Medium
             });
-        
+
         var nonJetInterval = arrivalLookup.GetArrivalInterval(
             "YZZZ",
             "ABCDE",

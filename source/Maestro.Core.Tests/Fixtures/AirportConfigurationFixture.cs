@@ -19,17 +19,26 @@ public class AirportConfigurationFixture
                 new RunwayConfiguration
                 {
                     Identifier = "34L",
-                    DefaultLandingRateSeconds = 180
+                    LandingRateSeconds = 180,
+                    Preferences = new RunwayPreferences
+                    {
+                        FeederFixes = ["RIVET", "WELSH"],
+                        WakeCategories = [WakeCategory.SuperHeavy, WakeCategory.Heavy]
+                    }
                 },
                 new RunwayConfiguration
                 {
                     Identifier = "34R",
-                    DefaultLandingRateSeconds = 180
+                    LandingRateSeconds = 180,
+                    Preferences = new RunwayPreferences
+                    {
+                        FeederFixes = ["BOREE", "YAKKA", "MARLN"]
+                    }
                 }
             ],
             RunwayModes =
             [
-                new RunwayModeConfiguration
+                new RunwayMode
                 {
                     Identifier = "34IVA",
                     Runways =
@@ -37,12 +46,12 @@ public class AirportConfigurationFixture
                         new RunwayConfiguration
                         {
                             Identifier = "34L",
-                            DefaultLandingRateSeconds = 180
+                            LandingRateSeconds = 180
                         },
                         new RunwayConfiguration
                         {
                             Identifier = "34R",
-                            DefaultLandingRateSeconds = 180
+                            LandingRateSeconds = 180
                         }
                     ]
                 }
@@ -62,7 +71,7 @@ public class AirportConfigurationFixture
                 },
                 new ArrivalConfiguration
                 {
-                    FeederFix = "AKMIR",
+                    FeederFix = "WELSH",
                     ArrivalRegex = new Regex(@"ODALE\d"),
                     Category = AircraftCategory.Jet,
                     RunwayIntervals = new Dictionary<string, int>
@@ -82,7 +91,7 @@ public class AirportConfigurationFixture
                     ViewMode = ViewMode.Enroute
                 }
             ],
-            FeederFixes = ["RIVET", "AKMIR"],
-            RunwayAssignmentRules = []
+            FeederFixes = ["RIVET", "WELSH"],
+            DepartureAirports = ["YSCB"]
         };
 }

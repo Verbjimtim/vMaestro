@@ -1,6 +1,8 @@
 ﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Maestro.Core.Messages;
+using Maestro.Core.Model;
+using Maestro.Wpf.Integrations;
 using Maestro.Wpf.Messages;
 using MediatR;
 
@@ -8,95 +10,231 @@ namespace Maestro.Wpf.ViewModels;
 
 public partial class FlightLabelViewModel(
     IMediator mediator,
-    FlightViewModel flightViewModel,
+    IErrorReporter errorReporter,
+    SequenceViewModel sequence,
+    FlightMessage flightViewModel,
     RunwayModeViewModel runwayModeViewModel)
     : ObservableObject
 {
-    public FlightViewModel FlightViewModel { get; } = flightViewModel;
+    [ObservableProperty]
+    bool _isSelected = false;
+
+    public FlightMessage FlightViewModel { get; } = flightViewModel;
     public RunwayModeViewModel RunwayModeViewModel { get; } = runwayModeViewModel;
 
-    public FlightLabelViewModel() : this(
-        null!,
-        new FlightViewModel(),
-        new RunwayModeViewModel("34", [new RunwayViewModel("34L", TimeSpan.Zero)]))
-    {
-    }
+    public bool CanInsertBefore => FlightViewModel.State != State.Frozen;
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanShowInformation))]
     void ShowInformationWindow()
     {
-        mediator.Send(new OpenInformationWindowRequest(FlightViewModel));
+        try
+        {
+            mediator.Send(new OpenInformationWindowRequest(FlightViewModel));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
     }
 
-    [RelayCommand]
+    bool CanShowInformation()
+    {
+        return !FlightViewModel.IsDummy;
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRecompute))]
     void Recompute()
     {
-        mediator.Send(new RecomputeRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign));
+        try
+        {
+            mediator.Send(new RecomputeRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
+    }
+
+    bool CanRecompute()
+    {
+        return !FlightViewModel.IsDummy;
     }
 
     [RelayCommand]
     void ChangeRunway(string runwayIdentifier)
     {
-        mediator.Send(new ChangeRunwayRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign, runwayIdentifier));
+        try
+        {
+            mediator.Send(new ChangeRunwayRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign, runwayIdentifier));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanInsertFlightBefore))]
     void InsertFlightBefore()
     {
-        mediator.Send(new OpenInsertFlightWindowRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign, InsertionPoint.Before));
+        try
+        {
+            mediator.Send(
+                new OpenInsertFlightWindowRequest(
+                    FlightViewModel.DestinationIdentifier,
+                    new RelativeInsertionOptions(FlightViewModel.Callsign, RelativePosition.Before),
+                    sequence.Flights.Where(f => f.State == State.Landed).ToArray(),
+                    sequence.Flights.Where(f => f.State == State.Pending).ToArray()));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
+    }
+
+    bool CanInsertFlightBefore()
+    {
+        return FlightViewModel.State != State.Frozen;
     }
 
     [RelayCommand]
     void InsertFlightAfter()
     {
-        mediator.Send(new OpenInsertFlightWindowRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign, InsertionPoint.After));
+        try
+        {
+            mediator.Send(
+                new OpenInsertFlightWindowRequest(
+                    FlightViewModel.DestinationIdentifier,
+                    new RelativeInsertionOptions(FlightViewModel.Callsign, RelativePosition.Before),
+                    sequence.Flights.Where(f => f.State == State.Landed).ToArray(),
+                    sequence.Flights.Where(f => f.State == State.Pending).ToArray()));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
     }
 
     [RelayCommand]
     void InsertSlotBefore()
     {
-        mediator.Send(new OpenInsertSlotWindowRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign, InsertionPoint.Before));
+        try
+        {
+            mediator.Send(
+                new BeginSlotCreationRequest(
+                    FlightViewModel.DestinationIdentifier,
+                    [FlightViewModel.AssignedRunway],
+                    FlightViewModel.LandingTime,
+                    SlotCreationReferencePoint.Before));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
     }
 
     [RelayCommand]
     void InsertSlotAfter()
     {
-        mediator.Send(new OpenInsertSlotWindowRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign, InsertionPoint.After));
+        try
+        {
+            mediator.Send(
+                new BeginSlotCreationRequest(
+                    FlightViewModel.DestinationIdentifier,
+                    [FlightViewModel.AssignedRunway],
+                    FlightViewModel.LandingTime,
+                    SlotCreationReferencePoint.After));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanChangeEta))]
     void ChangeEta()
     {
-        mediator.Send(new OpenEstimateWindowRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign));
+        try
+        {
+            mediator.Send(
+                new OpenChangeFeederFixEstimateWindowRequest(
+                    FlightViewModel.DestinationIdentifier,
+                    FlightViewModel.Callsign,
+                    FlightViewModel.FeederFixIdentifier!,
+                    FlightViewModel.FeederFixEstimate!.Value));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
+    }
+
+    bool CanChangeEta()
+    {
+        return !string.IsNullOrEmpty(FlightViewModel.FeederFixIdentifier) && FlightViewModel.FeederFixEstimate != null;
     }
 
     [RelayCommand]
     void Remove()
     {
-        mediator.Send(new RemoveRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign));
+        try
+        {
+            mediator.Send(new RemoveRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
     }
 
     [RelayCommand]
     void Desequence()
     {
-        mediator.Send(new DesequenceRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign));
+        try
+        {
+            mediator.Send(new DesequenceRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
     }
 
     [RelayCommand]
     void MakePending()
     {
-        mediator.Send(new MakePendingRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign));
+        try
+        {
+            mediator.Send(new MakePendingRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
     }
 
     [RelayCommand]
     void ZeroDelay()
     {
-        mediator.Send(new ZeroDelayRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign));
+        try
+        {
+            mediator.Send(new ZeroDelayRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
     }
 
     [RelayCommand]
     void Coordination()
     {
-        mediator.Send(new OpenCoordinationWindowRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign));
+        try
+        {
+            mediator.Send(new OpenCoordinationWindowRequest(FlightViewModel.DestinationIdentifier, FlightViewModel.Callsign));
+        }
+        catch (Exception ex)
+        {
+            errorReporter.ReportError(ex);
+        }
     }
 }

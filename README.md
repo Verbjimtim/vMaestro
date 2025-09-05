@@ -1,5 +1,5 @@
 <h1 align="center">
-  vMaestro 
+  vMaestro
 </h1>
 
 <h3 align="center">
@@ -26,92 +26,40 @@ If you have a large screen resolution, you may need to run the `dpiaware-fix.bat
 
 Logs will be written to the vatSys installation directory under `MaestroLogs`.
 
-# Known Issues 
+# Known Issues
 
+- When the Maestro.json file is missing, vatSys gets flooded with exceptions
 - Desequence and Information windows do not re-draw
-- The Debug window always moves to the back of the stack when moving your mouse cursor over a vatSys window.
-- When a button is enabled, it's appearance is still disabled, but it is still interactable.
-- The ladder occasionally stop updating.
-- Desequence window can be re-opened multiple times.
-- Diversions result in weird behaviour.
-- Stable flights don't seem to get updated ETAs.
-- Recompute, ETA_FF and STA_FF update, but STA doesn't.
-- Resuming a desequenced flight does not work
-- Q: Should times from vatSys be rounded to the nearest 30 secs?
+- Window can be re-opened multiple times
 
 # Roadmap
 
-- [X] Eurocat Look and Feel
-    - [X] Pull theme from vatSys
-    - [X] Create custom controls to follow vatSys theme
-    - [X] Custom buttons
-    - [X] Custom separators
-    - [X] Clean up timeline
-    - [X] Clean up combobox
-    - [X] Fix sector selector
-    - [X] Move inline styles into Theme and Style.xaml
-
-- [X] Configuration
-    - [X] Load configuration from profile
-    
-- [ ] Offline Mode (MVP)
-    - [X] Implement domain models, handlers, tiny types, etc.
-    - [X] Publish notifications on FDP updates
-    - [X] Information window
-    - [X] Basic sequencing algorithm
-    - [X] Automatic runway assignment
-    - [X] Recompute
-    - [X] Remove from sequence
-    - [X] Desequence
-    - [ ] Change runway mode
-    - [ ] Change runway rates
-    - [ ] Insert flight
-    - [ ] Change ETA FF
-
-- [ ] Internal System Tasks
-    - [ ] Remove flights after landing (STA + configurable time)
-    - [ ] Remove flights after disconnecting
-
-- [ ] Sequencing Algorithm Refinement
-    - [ ] Factor GRIB winds into estimate calculations (If required)
-    - [X] Use FF and STAR suffix for ETI
-    - [ ] Separate enroute and TMA delays
-    - [ ] Consider separation at the feeder fix
-    - [ ] Consider TMA delay modes (Normal, pressure, and max delay approach)
-    - [ ] Apply optimisations (i.e. runway selection)
-
-- [ ] Online Mode
-    - [ ] Run sequencing code in a standalone server
-    - [ ] Connect to Maestro server via WebSocket
-    - [ ] Source airport configuration from server
-    - [ ] Redirect notifications and requests to server
-    - [ ] Source sequence information from server
-    - [ ] Allow Flow to modify the sequence
-    - [ ] Authentication
-
-- [ ] Extras
-    - [ ] Ladder scrolling
-    - [ ] Account for GRIB winds
-    - [ ] Blockout periods
-    - [ ] Insert slot
-    - [ ] Zero Delay and priority flights
-    - [ ] Departure list
-    - [ ] Pending flights
-    - [ ] Unit selector
-    - [ ] Coordination
-    - [ ] Revisit strong ID types
-
-- [ ] Fault Tolerance
-    - [ ] Ensure exceptions are contained and recovered from. Do not crash vatSys.
-    - [ ] Persist offline sequences to sqlite in case of a restart.
-
-- [ ] Look and feel improvements
-    - [ ] Refine border sizes and margins
-    - [ ] Check font sizing
-    - [ ] Size elements based on font width and height
-    - [ ] Check colors
-
-- [ ] Nice to haves
-    - [ ] Custom debugger configuration (start and attach to vatSys)
-    - [ ] Arrival list / GlobalOps backup
-    - [ ] Per-sequence online mode (E.g: YSSY offline, YMML online)
+- [X] Publish notifications on FDP updates
+- [X] Information window
+- [X] Basic sequencing algorithm
+- [X] Automatic runway assignment
+- [X] Dependant runways
+- [X] Recompute
+- [X] Remove from sequence
+- [X] Desequence
+- [X] Change runway
+- [X] Move flight (click and drag)
+- [ ] Move flight (single click)
+- [ ] Swap flights
+- [X] Change runway mode
+- [X] Change ETA FF
+- [X] Zero Delay and priority flights
+- [X] Insert slot
+- [X] Insert flight
+- [X] Insert departure
+- [ ] Maximum delay (revisit High Priority and Zero Delay)
+- [ ] Unit selector
+- [ ] Approach types
+- [ ] Separate enroute and TMA delays
+- [ ] Coordination window
+- [ ] Start sequencing on-demand
+- [ ] Online mode
+- [ ] Ladder scrolling
+- [ ] GitHub actions CI
+- [ ] Architecture Decision Record
+- [ ] Docs
