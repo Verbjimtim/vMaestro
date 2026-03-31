@@ -1,26 +1,23 @@
-﻿using Maestro.Wpf;
+﻿using Maestro.Plugin.Infrastructure;
+using Maestro.Wpf;
+using Maestro.Wpf.Contracts;
+using Maestro.Wpf.ViewModels;
 using Maestro.Wpf.Views;
 using MediatR;
 
 namespace Maestro.Plugin.Handlers;
 
 
-public class OpenInformationWindowHandler(GuiInvoker guiInvoker)
+public class OpenInformationWindowHandler(WindowManager windowManager)
     : IRequestHandler<OpenInformationWindowRequest, OpenInformationWindowResponse>
 {
     public Task<OpenInformationWindowResponse> Handle(OpenInformationWindowRequest request, CancellationToken cancellationToken)
     {
-        guiInvoker.InvokeOnUiThread(mainForm =>
-        {
-            var child = new InformationView(request.Flight);
-            var form = new VatSysForm(
-                title: request.Flight.Callsign,
-                child,
-                shrinkToContent: true);
-            
-            form.Show(mainForm);
-        });
-        
+        windowManager.FocusOrCreateWindow(
+            WindowKeys.Information(request.Flight.Callsign),
+            request.Flight.Callsign,
+            _ => new InformationView(new FlightInformationViewModel(request.Flight)));
+
         return Task.FromResult(new OpenInformationWindowResponse());
     }
 }

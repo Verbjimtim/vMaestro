@@ -1,6 +1,6 @@
 ﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using Maestro.Core.Messages;
+using Maestro.Contracts.Flights;
 using Maestro.Wpf.Integrations;
 using MediatR;
 
@@ -51,7 +51,9 @@ public partial class ChangeFeederFixEstimateViewModel : ObservableObject
     {
         try
         {
-            await _mediator.Send(new ChangeFeederFixEstimateRequest(_airportIdentifier, Callsign, NewFeederFixEstimate));
+            await _mediator.Send(
+                new ChangeFeederFixEstimateRequest(_airportIdentifier, Callsign, NewFeederFixEstimate),
+                CancellationToken.None);
             _windowHandle.Close();
         }
         catch (Exception ex)

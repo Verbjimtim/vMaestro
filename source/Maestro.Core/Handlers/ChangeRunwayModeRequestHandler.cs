@@ -1,37 +1,21 @@
-﻿using Maestro.Core.Configuration;
+﻿using Maestro.Contracts.Coordination;
+using Maestro.Contracts.Runway;
+using Maestro.Contracts.Sessions;
+using Maestro.Core.Configuration;
+using Maestro.Core.Connectivity;
 using Maestro.Core.Extensions;
+using Maestro.Core.Hosting;
 using Maestro.Core.Infrastructure;
-using Maestro.Core.Messages;
 using Maestro.Core.Model;
 using MediatR;
 using Serilog;
 
 namespace Maestro.Core.Handlers;
 
-// TODO: Move DTOs.
-public class RunwayModeDto(string identifier, RunwayConfigurationDto[] runways)
-{
-    public string Identifier { get; } = identifier;
-    public RunwayConfigurationDto[] Runways { get; } = runways;
-}
-
-public class RunwayConfigurationDto(string runwayIdentifier, int landingRateSeconds)
-{
-    public string RunwayIdentifier { get; } = runwayIdentifier;
-    public int AcceptanceRate { get; } = landingRateSeconds;
-}
-
-public record ChangeRunwayModeRequest(
-    string AirportIdentifier,
-    RunwayModeDto RunwayMode,
-    DateTimeOffset LastLandingTimeForOldMode,
-    DateTimeOffset FirstLandingTimeForNewMode)
-    : IRequest;
-
 public class ChangeRunwayModeRequestHandler(
-    ISequenceProvider sequenceProvider,
+    IMaestroInstanceManager instanceManager,
+    IMaestroConnectionManager connectionManager,
     IAirportConfigurationProvider airportConfigurationProvider,
-    IScheduler scheduler,
     IClock clock,
     IMediator mediator,
     ILogger logger)
@@ -39,55 +23,92 @@ public class ChangeRunwayModeRequestHandler(
 {
     public async Task Handle(ChangeRunwayModeRequest request, CancellationToken cancellationToken)
     {
-        using var lockedSequence = await sequenceProvider.GetSequence(request.AirportIdentifier, cancellationToken);
-
-        var airportConfiguration = airportConfigurationProvider.GetAirportConfigurations().SingleOrDefault(c => c.Identifier == request.AirportIdentifier);
-        if (airportConfiguration == null)
+        if (connectionManager.TryGetConnection(request.AirportIdentifier, out var connection) &&
+            connection.IsConnected &&
+            !connection.IsMaster)
         {
-            logger.Warning("Airport configuration not found for {AirportIdentifier}.", request.AirportIdentifier);
+            logger.Information("Relaying ChangeRunwayModeRequest for {AirportIdentifier}", request.AirportIdentifier);
+            await connection.Invoke(request, cancellationToken);
             return;
         }
 
-        var configuration = new RunwayMode
-        {
-            Identifier = request.RunwayMode.Identifier,
-            Runways = request.RunwayMode.Runways.Select(r =>
-                    new RunwayConfiguration
-                    {
-                        Identifier = r.RunwayIdentifier,
-                        LandingRateSeconds = r.AcceptanceRate
-                    })
-                .ToArray()
-        };
+        var instance = await instanceManager.GetInstance(request.AirportIdentifier, cancellationToken);
+        SessionDto sessionDto;
 
-        if (request.FirstLandingTimeForNewMode <= clock.UtcNow())
+        using (await instance.Semaphore.LockAsync(cancellationToken))
         {
-            lockedSequence.Sequence.ChangeRunwayMode(configuration, scheduler);
+            var sequence = instance.Session.Sequence;
 
-            logger.Information(
-                "Runway changed {AirportIdentifier} to {RunwayModeIdentifier}.",
-                request.AirportIdentifier,
-                configuration.Identifier);
-        }
-        else
-        {
-            lockedSequence.Sequence.ChangeRunwayMode(
-                configuration,
-                request.LastLandingTimeForOldMode,
-                request.FirstLandingTimeForNewMode,
-                scheduler);
+            var airportConfiguration = airportConfigurationProvider.GetAirportConfiguration(request.AirportIdentifier);
 
-            logger.Information(
-                "Runway change scheduled for {AirportIdentifier} to {RunwayModeIdentifier} at {RunwayModeChangeTime}.",
-                request.AirportIdentifier,
-                configuration.Identifier,
-                request.FirstLandingTimeForNewMode);
+            var runwayModeConfig = airportConfiguration.RunwayModes.SingleOrDefault(rm => rm.Identifier == request.RunwayMode.Identifier);
+            if (runwayModeConfig is null)
+            {
+                logger.Warning("Runway mode {RunwayModeIdentifier} not found for {AirportIdentifier}.", request.RunwayMode.Identifier, request.AirportIdentifier);
+                return;
+            }
+
+            var configuration = new RunwayMode(runwayModeConfig);
+            foreach (var runwayDto in request.RunwayMode.Runways)
+            {
+                var runwayIdentifier = runwayDto.Identifier;
+                var acceptanceRate = runwayDto.AcceptanceRateSeconds;
+
+                var runway = configuration.Runways.SingleOrDefault(r => r.Identifier == runwayIdentifier);
+                if (runway is null)
+                {
+                    logger.Warning("Runway {RunwayIdentifier} not found in mode {RunwayModeIdentifier} for {AirportIdentifier}.", runwayIdentifier, request.RunwayMode.Identifier, request.AirportIdentifier);
+                }
+                else
+                {
+                    runway.ChangeAcceptanceRate(TimeSpan.FromSeconds(acceptanceRate));
+                }
+            }
+
+            if (request.FirstLandingTimeForNewMode <= clock.UtcNow())
+            {
+                sequence.ChangeRunwayMode(configuration);
+                logger.Information(
+                    "Runway changed {AirportIdentifier} to {RunwayModeIdentifier}.",
+                    request.AirportIdentifier,
+                    configuration.Identifier);
+
+                await mediator.Send(
+                    new SendCoordinationMessageRequest(
+                        request.AirportIdentifier,
+                        clock.UtcNow(),
+                        $"Configuration change {request.RunwayMode.Identifier}",
+                        new CoordinationDestination.Broadcast()),
+                    cancellationToken);
+            }
+            else
+            {
+                sequence.ChangeRunwayMode(
+                    configuration,
+                    request.LastLandingTimeForOldMode,
+                    request.FirstLandingTimeForNewMode);
+                logger.Information(
+                    "Runway change scheduled for {AirportIdentifier} to {RunwayModeIdentifier} at {RunwayModeChangeTime}.",
+                    request.AirportIdentifier,
+                    configuration.Identifier,
+                    request.FirstLandingTimeForNewMode);
+
+                await mediator.Send(
+                    new SendCoordinationMessageRequest(
+                        request.AirportIdentifier,
+                        clock.UtcNow(),
+                        $"Configuration change {request.RunwayMode.Identifier} scheduled for {request.LastLandingTimeForOldMode:HH:mm}",
+                        new CoordinationDestination.Broadcast()),
+                    cancellationToken);
+            }
+
+            sessionDto = instance.Session.Snapshot();
         }
 
         await mediator.Publish(
-            new SequenceUpdatedNotification(
-                lockedSequence.Sequence.AirportIdentifier,
-                lockedSequence.Sequence.ToMessage()),
+            new SessionUpdatedNotification(
+                instance.AirportIdentifier,
+                sessionDto),
             cancellationToken);
     }
 }

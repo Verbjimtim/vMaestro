@@ -1,39 +1,110 @@
-﻿using Maestro.Core.Extensions;
+﻿using Maestro.Contracts.Flights;
+using Maestro.Contracts.Sessions;
+using Maestro.Contracts.Shared;
+using Maestro.Core.Configuration;
+using Maestro.Core.Connectivity;
+using Maestro.Core.Extensions;
+using Maestro.Core.Hosting;
 using Maestro.Core.Infrastructure;
-using Maestro.Core.Messages;
 using Maestro.Core.Model;
 using MediatR;
 using Serilog;
 
 namespace Maestro.Core.Handlers;
 
-public class ChangeRunwayRequestHandler(ISequenceProvider sequenceProvider, IScheduler scheduler, IClock clock, IMediator mediator, ILogger logger)
-    : IRequestHandler<ChangeRunwayRequest, ChangeRunwayResponse>
+public class ChangeRunwayRequestHandler(
+    IMaestroInstanceManager instanceManager,
+    IMaestroConnectionManager connectionManager,
+    IAirportConfigurationProvider airportConfigurationProvider,
+    ITrajectoryService trajectoryService,
+    IClock clock,
+    IMediator mediator,
+    ILogger logger)
+    : IRequestHandler<ChangeRunwayRequest>
 {
-    public async Task<ChangeRunwayResponse> Handle(ChangeRunwayRequest request, CancellationToken cancellationToken)
+    public async Task Handle(ChangeRunwayRequest request, CancellationToken cancellationToken)
     {
-        using var lockedSequence = await sequenceProvider.GetSequence(request.AirportIdentifier, cancellationToken);
-
-        var flight = lockedSequence.Sequence.FindTrackedFlight(request.Callsign);
-        if (flight == null)
+        if (connectionManager.TryGetConnection(request.AirportIdentifier, out var connection) &&
+            connection.IsConnected &&
+            !connection.IsMaster)
         {
-            logger.Warning("Flight {Callsign} not found for airport {AirportIdentifier}.", request.Callsign, request.AirportIdentifier);
-            return new ChangeRunwayResponse();
+            logger.Information("Relaying ChangeRunwayRequest for {AirportIdentifier}", request.AirportIdentifier);
+            await connection.Invoke(request, cancellationToken);
+            return;
         }
 
-        flight.SetRunway(request.RunwayIdentifier, true);
-        scheduler.Recompute(flight, lockedSequence.Sequence);
+        var airportConfiguration = airportConfigurationProvider.GetAirportConfiguration(request.AirportIdentifier);
 
-        // Unstable flights become Stable when changing runway
-        if (flight.State is State.Unstable)
-            flight.SetState(State.Stable, clock);
+        var instance = await instanceManager.GetInstance(request.AirportIdentifier, cancellationToken);
+        SessionDto sessionDto;
+
+        using (await instance.Semaphore.LockAsync(cancellationToken))
+        {
+            var sequence = instance.Session.Sequence;
+
+            var flight = sequence.FindFlight(request.Callsign);
+            if (flight == null)
+            {
+                logger.Warning("Flight {Callsign} not found for airport {AirportIdentifier}.", request.Callsign, request.AirportIdentifier);
+                return;
+            }
+
+            // TODO: Track who initiated the change
+            logger.Information("Changing runway for {Callsign} to {NewRunway}.", request.Callsign, request.RunwayIdentifier);
+
+            var runwayIdentifier = request.RunwayIdentifier;
+
+            var runwayMode = sequence.GetRunwayModeAt(flight.LandingTime);
+            var runway = runwayMode.Runways.FirstOrDefault(r => r.Identifier == runwayIdentifier);
+
+            var fixNames = instance.Session.FlightDataRecords.TryGetValue(flight.Callsign, out var flightDataRecord)
+                ? flightDataRecord.Estimates.Select(x => x.FixIdentifier).ToArray()
+                : [];
+
+            // Use the approach type defined in the current runway mode if this runway is in mode
+            // Otherwise, use the first available approach type for that runway
+            var approachType = runway?.ApproachType ?? GetApproachType(flight, runwayIdentifier, fixNames);
+
+            // Lookup trajectory for the new runway and approach before updating flight
+            var trajectory = trajectoryService.GetTrajectory(
+                flight,
+                request.RunwayIdentifier,
+                approachType,
+                fixNames);
+
+            flight.SetRunway(request.RunwayIdentifier, trajectory);
+
+            // Update approach type if it changed
+            if (flight.ApproachType != approachType)
+                flight.SetApproachType(approachType, trajectory);
+
+            // Unstable flights become Stable when changing runway
+            if (flight.State is State.Unstable)
+                flight.SetState(airportConfiguration.ManualInteractionState, clock);
+
+            sequence.RepositionByEstimate(flight);
+
+            sessionDto = instance.Session.Snapshot();
+        }
 
         await mediator.Publish(
-            new SequenceUpdatedNotification(
-                lockedSequence.Sequence.AirportIdentifier,
-                lockedSequence.Sequence.ToMessage()),
+            new SessionUpdatedNotification(
+                instance.AirportIdentifier,
+                sessionDto),
             cancellationToken);
+    }
 
-        return new ChangeRunwayResponse();
+    string GetApproachType(Flight flight, string runwayIdentifier, string[] fixNames)
+    {
+        var approachTypes = trajectoryService.GetApproachTypes(
+            flight.DestinationIdentifier,
+            flight.FeederFixIdentifier,
+            fixNames,
+            runwayIdentifier,
+            flight.GetPerformanceData());
+
+        return approachTypes.Contains(flight.ApproachType)
+            ? flight.ApproachType
+            : approachTypes.FirstOrDefault() ?? string.Empty;
     }
 }

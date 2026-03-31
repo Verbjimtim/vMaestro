@@ -1,9 +1,9 @@
 ﻿using Maestro.Core.Configuration;
-using Maestro.Core.Extensions;
+using Maestro.Core.Hosting;
 using Maestro.Core.Infrastructure;
-using Maestro.Core.Model;
+using Maestro.Plugin.Infrastructure;
+using Maestro.Wpf.Contracts;
 using Maestro.Wpf.Integrations;
-using Maestro.Wpf.Messages;
 using Maestro.Wpf.ViewModels;
 using Maestro.Wpf.Views;
 using MediatR;
@@ -11,56 +11,54 @@ using MediatR;
 namespace Maestro.Plugin.Handlers;
 
 public class OpenTerminalConfigurationWindowRequestHandler(
+    WindowManager windowManager,
     IAirportConfigurationProvider airportConfigurationProvider,
-    ISequenceProvider sequenceProvider,
-    GuiInvoker guiInvoker,
+    IMaestroInstanceManager instanceManager,
     IMediator mediator,
     IClock clock,
     IErrorReporter errorReporter)
     : IRequestHandler<OpenTerminalConfigurationRequest>
 {
-    public Task Handle(OpenTerminalConfigurationRequest request, CancellationToken cancellationToken)
+    public async Task Handle(OpenTerminalConfigurationRequest request, CancellationToken cancellationToken)
     {
-        var airportConfiguration = airportConfigurationProvider.GetAirportConfigurations()
-            .Single(a => a.Identifier == request.AirportIdentifier);
-        var sequence = sequenceProvider.GetReadOnlySequence(request.AirportIdentifier);
+        var airportConfiguration = airportConfigurationProvider.GetAirportConfiguration(request.AirportIdentifier);
+
+        var instance = await instanceManager.GetInstance(request.AirportIdentifier, cancellationToken);
+
+        var sessionDto = instance.Session.Snapshot();
+
         var runwayModes = airportConfiguration.RunwayModes
-            .Select(r => r.ToMessage())
+            .Select(r => new RunwayModeViewModel(r))
             .ToArray();
 
-        guiInvoker.InvokeOnUiThread(mainForm =>
-        {
-            var lastLandingTime = sequence.LastLandingTimeForCurrentMode == default
-                ? clock.UtcNow()
-                : sequence.LastLandingTimeForCurrentMode;
+        windowManager.FocusOrCreateWindow(
+            WindowKeys.TerminalConfiguration(request.AirportIdentifier),
+            "TMA Configuration",
+            windowHandle =>
+            {
+                var lastLandingTime = sessionDto.Sequence.LastLandingTimeForCurrentMode == default
+                    ? clock.UtcNow()
+                    : sessionDto.Sequence.LastLandingTimeForCurrentMode;
 
-            var firstLandingTime = sequence.FirstLandingTimeForNextMode == default
-                ? clock.UtcNow()
-                : lastLandingTime.AddMinutes(5); // Make configurable
+                var firstLandingTime = sessionDto.Sequence.FirstLandingTimeForNextMode == default
+                    ? clock.UtcNow()
+                    : lastLandingTime.AddMinutes(5);
 
-            var windowHandle = new WindowHandle();
-            var viewModel = new TerminalConfigurationViewModel(
-                request.AirportIdentifier,
-                runwayModes,
-                sequence.CurrentRunwayMode,
-                sequence.NextRunwayMode,
-                lastLandingTime,
-                firstLandingTime,
-                mediator,
-                windowHandle,
-                clock,
-                errorReporter);
+                var viewModel = new TerminalConfigurationViewModel(
+                    request.AirportIdentifier,
+                    runwayModes,
+                    new RunwayModeViewModel(sessionDto.Sequence.CurrentRunwayMode),
+                    sessionDto.Sequence.NextRunwayMode is not null ? new RunwayModeViewModel(sessionDto.Sequence.NextRunwayMode) : null,
+                    lastLandingTime,
+                    firstLandingTime,
+                    airportConfiguration,
+                    sessionDto.SurfaceWind,
+                    mediator,
+                    windowHandle,
+                    clock,
+                    errorReporter);
 
-            var form = new VatSysForm(
-                title: "TMA Configuration",
-                new TerminalConfigurationView(viewModel),
-                shrinkToContent: false);
-
-            windowHandle.SetForm(form);
-
-            form.Show(mainForm);
-        });
-
-        return Task.CompletedTask;
+                return new TerminalConfigurationView(viewModel);
+            });
     }
 }

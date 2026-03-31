@@ -1,31 +1,27 @@
-﻿using Maestro.Wpf.Integrations;
-using Maestro.Wpf.Messages;
+﻿using Maestro.Plugin.Infrastructure;
+using Maestro.Wpf.Contracts;
+using Maestro.Wpf.Integrations;
 using Maestro.Wpf.ViewModels;
 using Maestro.Wpf.Views;
 using MediatR;
 
 namespace Maestro.Plugin.Handlers;
 
-public class OpenDesequencedWindowRequestHandler(GuiInvoker guiInvoker, IMediator mediator, IErrorReporter errorReporter)
+public class OpenDesequencedWindowRequestHandler(WindowManager windowManager, IMediator mediator, IErrorReporter errorReporter)
     : IRequestHandler<OpenDesequencedWindowRequest, OpenDesequencedWindowResponse>
 {
     public Task<OpenDesequencedWindowResponse> Handle(OpenDesequencedWindowRequest request, CancellationToken cancellationToken)
     {
-        guiInvoker.InvokeOnUiThread(mainForm =>
-        {
-            var child = new DesequencedView(
+        windowManager.FocusOrCreateWindow(
+            WindowKeys.Desequenced(request.AirportIdentifier),
+            "De-sequenced",
+            windowHandle => new DesequencedView(
                 new DesequencedViewModel(
                     mediator,
+                    windowHandle,
                     errorReporter,
                     request.AirportIdentifier,
-                    request.Callsigns));
-            var form = new VatSysForm(
-                title: "De-sequenced",
-                child,
-                shrinkToContent: true);
-
-            form.Show(mainForm);
-        });
+                    request.Callsigns)));
 
         return Task.FromResult(new OpenDesequencedWindowResponse());
     }

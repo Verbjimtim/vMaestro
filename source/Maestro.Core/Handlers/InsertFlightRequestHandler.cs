@@ -1,152 +1,472 @@
-﻿using Maestro.Core.Configuration;
+using Maestro.Contracts.Flights;
+using Maestro.Contracts.Sessions;
+using Maestro.Contracts.Shared;
+using Maestro.Core.Configuration;
+using Maestro.Core.Connectivity;
 using Maestro.Core.Extensions;
+using Maestro.Core.Hosting;
 using Maestro.Core.Infrastructure;
-using Maestro.Core.Messages;
+using Maestro.Core.Integration;
 using Maestro.Core.Model;
+using Maestro.Core.Sessions;
 using MediatR;
+using Serilog;
 
 namespace Maestro.Core.Handlers;
 
 public class InsertFlightRequestHandler(
-    ISequenceProvider sequenceProvider,
-    IScheduler scheduler,
-    IClock clock,
+    IMaestroInstanceManager instanceManager,
+    IMaestroConnectionManager connectionManager,
     IPerformanceLookup performanceLookup,
-    IMediator mediator)
+    IAirportConfigurationProvider airportConfigurationProvider,
+    ITrajectoryService trajectoryService,
+    IClock clock,
+    IMediator mediator,
+    ILogger logger)
     : IRequestHandler<InsertFlightRequest>
 {
+    const int MaxCallsignLength = 12;
+
     public async Task Handle(InsertFlightRequest request, CancellationToken cancellationToken)
     {
-        using var lockedSequence = await sequenceProvider.GetSequence(request.AirportIdentifier, cancellationToken);
-        var sequence = lockedSequence.Sequence;
-
-        var (landingTime, runwayIdentifiers) = FindTargetLandingTime(sequence, request.Options);
-
-        var runwayModeAtLandingTime = sequence.NextRunwayMode is not null
-            ? sequence.FirstLandingTimeForNextMode.IsSameOrBefore(landingTime)
-                ? sequence.NextRunwayMode
-                : sequence.CurrentRunwayMode
-            : sequence.CurrentRunwayMode;
-
-        var runway =
-            runwayModeAtLandingTime.Runways.FirstOrDefault(r => runwayIdentifiers.Contains(r.Identifier))?.Identifier ??
-            runwayModeAtLandingTime.Default.Identifier;
-
-        var state = State.Frozen; // TODO: Make this configurable
-
-        // If the callsign was blank, create a dummy flight
-        if (string.IsNullOrWhiteSpace(request.Callsign))
+        if (connectionManager.TryGetConnection(request.AirportIdentifier, out var connection) &&
+            connection.IsConnected &&
+            !connection.IsMaster)
         {
-            sequence.AddDummyFlight(landingTime, runway, scheduler, clock);
-            await mediator.Publish(
-                new SequenceUpdatedNotification(sequence.AirportIdentifier, sequence.ToMessage()),
-                cancellationToken);
+            logger.Information("Relaying InsertFlightRequest for {AirportIdentifier}", request.AirportIdentifier);
+            await connection.Invoke(request, cancellationToken);
             return;
         }
 
-        // BUG: If inserting after a frozen flight, nothing happens
-        var landedFlight = sequence.Flights.FirstOrDefault(f=> f.Callsign == request.Callsign && f.State == State.Landed);
-        if (landedFlight is not null)
-        {
-            // Re-sequence the landed flight at the specified time
-            landedFlight.SetState(State.Overshoot, clock);
-            landedFlight.SetRunway(runway, manual: true);
-            landedFlight.SetLandingTime(landingTime);
-            scheduler.Schedule(sequence);
-            landedFlight.SetState(state, clock);
-            await mediator.Publish(
-                new SequenceUpdatedNotification(sequence.AirportIdentifier, sequence.ToMessage()),
-                cancellationToken);
-            return;
-        }
+        var airportConfiguration = airportConfigurationProvider.GetAirportConfiguration(request.AirportIdentifier);
 
-        var pendingFlight = sequence.Flights.FirstOrDefault(f => f.Callsign == request.Callsign && f.State == State.Pending);
-        if (pendingFlight is not null)
-        {
-            pendingFlight.SetState(State.New, clock);
-            pendingFlight.SetRunway(runway, manual: true);
-            pendingFlight.SetLandingTime(landingTime);
-            scheduler.Schedule(sequence);
-            pendingFlight.SetState(State.Unstable, clock);
-            await mediator.Publish(
-                new SequenceUpdatedNotification(sequence.AirportIdentifier, sequence.ToMessage()),
-                cancellationToken);
-            return;
-        }
+        var instance = await instanceManager.GetInstance(request.AirportIdentifier, cancellationToken);
+        SessionDto sessionDto;
 
-        // Create a new flight if it does not exist
-        if (!string.IsNullOrWhiteSpace(request.Callsign))
+        using (await instance.Semaphore.LockAsync(cancellationToken))
         {
-            // TODO: Make a default for this somewhere
-            var performanceInfo = !string.IsNullOrEmpty(request.AircraftType)
-                ? performanceLookup.GetPerformanceDataFor(request.AircraftType)
-                : null;
+            var callsign = request.Callsign?.Trim().ToUpperInvariant().Truncate(MaxCallsignLength)!;
+            var isDummyFlight = string.IsNullOrWhiteSpace(callsign);
+            if (isDummyFlight)
+                callsign = instance.Session.NewDummyCallsign();
 
-            var flight = new Flight(request.Callsign, request.AirportIdentifier, landingTime)
+            var aircraftType = string.IsNullOrEmpty(request.AircraftType)
+                ? airportConfiguration.DefaultAircraftType
+                : request.AircraftType;
+
+            var performanceData = performanceLookup.GetPerformanceDataFor(aircraftType);
+
+            var flight = request.Options switch
             {
-                AircraftType = request.AircraftType,
-                WakeCategory = performanceInfo?.WakeCategory,
+                ExactInsertionOptions exactInsertionOptions => InsertExact(
+                    airportConfiguration,
+                    instance.Session,
+                    request.AirportIdentifier,
+                    callsign,
+                    performanceData,
+                    exactInsertionOptions.TargetLandingTime,
+                    exactInsertionOptions.RunwayIdentifiers),
+
+                RelativeInsertionOptions relativeInsertionOptions => InsertRelative(
+                    airportConfiguration,
+                    instance.Session,
+                    request.AirportIdentifier,
+                    callsign,
+                    performanceData,
+                    relativeInsertionOptions.ReferenceCallsign,
+                    relativeInsertionOptions.Position),
+
+                DepartureInsertionOptions departureInsertionOptions => InsertDeparture(
+                    airportConfiguration,
+                    instance.Session,
+                    request.AirportIdentifier,
+                    callsign,
+                    performanceData,
+                    departureInsertionOptions.OriginIdentifier,
+                    departureInsertionOptions.TakeoffTime),
+
+                _ => throw new NotSupportedException($"Unexpected insertion option: \"{request.Options.GetType()}\"")
             };
 
-            flight.SetRunway(runway, manual: true);
-            flight.SetLandingTime(landingTime, manual: true);
+            logger.Information("Inserted flight {Callsign} with landing time {LandingTime:HHmm} (target time {TargetTime:HHmm}", callsign, flight.LandingTime, flight.TargetLandingTime);
 
-            flight.SetState(state, clock);
-
-            sequence.AddFlight(flight, scheduler);
-            await mediator.Publish(
-                new SequenceUpdatedNotification(sequence.AirportIdentifier, sequence.ToMessage()),
-                cancellationToken);
+            sessionDto = instance.Session.Snapshot();
         }
+
+        await mediator.Publish(
+            new SessionUpdatedNotification(
+                instance.AirportIdentifier,
+                sessionDto),
+            cancellationToken);
     }
 
-    (DateTimeOffset, string[]) FindTargetLandingTime(Sequence sequence, IInsertFlightOptions options)
+    Flight InsertExact(
+        AirportConfiguration airportConfiguration,
+        Session session,
+        string airportIdentifier,
+        string callsign,
+        AircraftPerformanceData performanceData,
+        DateTimeOffset targetLandingTime,
+        string[] runwayIdentifiers)
     {
-        if (options is ExactInsertionOptions exactInsertionOptions)
-            return (exactInsertionOptions.TargetLandingTime, exactInsertionOptions.RunwayIdentifiers);
-
-        if (options is not RelativeInsertionOptions relativeInsertionOptions)
-            throw new ArgumentOutOfRangeException(nameof(options));
-
-        var referenceFlight = sequence.Flights.SingleOrDefault(f => f.Callsign == relativeInsertionOptions.ReferenceCallsign);
-        if (referenceFlight is null)
-            throw new MaestroException($"Reference flight {relativeInsertionOptions.ReferenceCallsign} not found");
-
-        if (referenceFlight.State == State.Frozen && relativeInsertionOptions.Position == RelativePosition.Before)
-            throw new MaestroException("Flights cannot be inserted before a frozen flight");
-
-        // Calculate time separation based on landing rate
-        var referenceTime = referenceFlight.ScheduledLandingTime;
-        var runwayModeAtReferenceTime = GetRunwayModeAtTime(sequence, referenceTime);
-        var targetRunway = referenceFlight.AssignedRunwayIdentifier;
-        var landingRate = GetTimeSeparationForRunway(runwayModeAtReferenceTime, targetRunway);
-
-        var targetLandingTime = relativeInsertionOptions.Position switch
+        foreach (var runwayIdentifier in runwayIdentifiers)
         {
-            RelativePosition.Before => referenceTime.Subtract(landingRate),
-            RelativePosition.After => referenceTime.Add(landingRate),
+            session.Sequence.ThrowIsTimeIsUnavailable(
+                callsign,
+                targetLandingTime,
+                runwayIdentifier);
+        }
+
+        var runway = FindRunway(
+            session.Sequence,
+            targetLandingTime,
+            runwayIdentifiers);
+
+        CheckAndRemoveExistingFlight(session.Sequence, callsign);
+
+        var existingPendingFlight = session.PendingFlights.SingleOrDefault(f => f.Callsign == callsign);
+
+        Flight flight;
+        if (existingPendingFlight is null)
+        {
+            // Create a dummy flight if a pending flight couldn't be found
+            var trajectory = trajectoryService.GetTrajectory(
+                performanceData,
+                airportIdentifier,
+                null,
+                runway.Identifier,
+                runway.ApproachType);
+
+            // TODO: test case - When inserting a dummy flight, at an exact time, FeederFixEstimate is TargetTime - Trajectory.TimeToGo
+            flight = new Flight(
+                callsign: callsign,
+                aircraftType: performanceData.TypeCode,
+                aircraftCategory: performanceData.AircraftCategory,
+                wakeCategory: performanceData.WakeCategory,
+                destinationIdentifier: airportIdentifier,
+                assignedRunwayIdentifier: runway.Identifier,
+                approachType: runway.ApproachType,
+                trajectory: trajectory,
+                targetLandingTime: targetLandingTime,
+                state: State.Stable);
+        }
+        else
+        {
+            session.PendingFlights.Remove(existingPendingFlight);
+
+            flight = CreateFlightFromPending(
+                existingPendingFlight,
+                session,
+                airportConfiguration,
+                airportIdentifier,
+                performanceData,
+                runway,
+                landingEstimate: targetLandingTime);
+
+            flight.SetTargetLandingTime(targetLandingTime);
+            flight.SetState(airportConfiguration.DefaultPendingFlightState, clock);
+        }
+
+        // Calculate the insertion index based on the landing time.
+        // TODO: test case - When inserting a flight, at an exact time, the flight is positioned based on the TargetLandingTime (not the feeder fix estimate)
+        var insertionIndex = session.Sequence.FindIndex(
+            f => f.LandingTime.IsSameOrAfter(targetLandingTime));
+
+        if (insertionIndex == -1)
+            insertionIndex = session.Sequence.Flights.Count;
+
+        session.Sequence.Insert(insertionIndex, flight);
+
+        // Freeze dummy flights as soon as they've been scheduled
+        if (flight.IsManuallyInserted)
+        {
+            flight.SetState(airportConfiguration.DefaultDummyFlightState, clock);
+        }
+
+        return flight;
+    }
+
+    Flight InsertRelative(
+        AirportConfiguration airportConfiguration,
+        Session session,
+        string airportIdentifier,
+        string callsign,
+        AircraftPerformanceData performanceData,
+        string referenceCallsign,
+        RelativePosition position)
+    {
+        var referenceFlight = session.Sequence.FindFlight(referenceCallsign);
+        if (referenceFlight is null)
+            throw new MaestroException($"{referenceCallsign} not found");
+
+        if (referenceFlight.State is State.Frozen or State.Landed &&
+            position == RelativePosition.Before)
+            throw new MaestroException("Cannot insert a flight before a Frozen flight");
+
+        var runway = FindRunway(
+            session.Sequence,
+            referenceFlight.LandingTime,
+            [referenceFlight.AssignedRunwayIdentifier]);
+
+        var targetLandingTime = position switch
+        {
+            RelativePosition.Before => referenceFlight.LandingTime,
+            RelativePosition.After => referenceFlight.LandingTime.Add(runway.AcceptanceRate),
             _ => throw new ArgumentOutOfRangeException()
         };
 
-        return (targetLandingTime, [targetRunway]);
+        session.Sequence.ThrowIsTimeIsUnavailable(
+            callsign,
+            targetLandingTime,
+            runway.Identifier);
+
+        // Check if flight already exists in sequence
+        CheckAndRemoveExistingFlight(session.Sequence, callsign);
+
+        var existingPendingFlight = session.PendingFlights.SingleOrDefault(f => f.Callsign == callsign);
+
+        Flight flight;
+        if (existingPendingFlight is null)
+        {
+            // Create a dummy flight if a pending flight couldn't be found
+            var trajectory = trajectoryService.GetTrajectory(
+                performanceData,
+                airportIdentifier,
+                null,
+                runway.Identifier,
+                runway.ApproachType);
+
+            // TODO: test case - When inserting a dummy flight, relative to another, FeederFixEstimate is ReferenceFlight.LandingTime - AcceptanceRate - Trajectory.TimeToGo
+            flight = new Flight(
+                callsign: callsign,
+                aircraftType: performanceData.TypeCode,
+                aircraftCategory: performanceData.AircraftCategory,
+                wakeCategory: performanceData.WakeCategory,
+                destinationIdentifier: airportIdentifier,
+                assignedRunwayIdentifier: runway.Identifier,
+                approachType: runway.ApproachType,
+                trajectory: trajectory,
+                targetLandingTime: targetLandingTime,
+                state: State.Stable);
+        }
+        else
+        {
+            session.PendingFlights.Remove(existingPendingFlight);
+
+            flight = CreateFlightFromPending(
+                existingPendingFlight,
+                session,
+                airportConfiguration,
+                airportIdentifier,
+                performanceData,
+                runway,
+                landingEstimate: targetLandingTime);
+
+            flight.SetTargetLandingTime(targetLandingTime);
+            flight.SetState(airportConfiguration.DefaultPendingFlightState, clock);
+        }
+
+        // Calculate the insertion index based on the landing time.
+        // TODO: test case - When inserting a flight, relative to another, the flight is positioned based on the TargetLandingTime (not the feeder fix estimate)
+        var insertionIndex = session.Sequence.FindIndex(
+            f => f.LandingTime.IsSameOrAfter(targetLandingTime));
+
+        if (insertionIndex == -1)
+            insertionIndex = session.Sequence.Flights.Count;
+
+        session.Sequence.Insert(insertionIndex, flight);
+
+        // Freeze dummy flights as soon as they've been scheduled
+        if (flight.IsManuallyInserted)
+        {
+            flight.SetState(airportConfiguration.DefaultDummyFlightState, clock);
+        }
+
+        return flight;
     }
 
-    private static RunwayMode GetRunwayModeAtTime(Sequence sequence, DateTimeOffset time)
+    Flight InsertDeparture(
+        AirportConfiguration airportConfiguration,
+        Session session,
+        string airportIdentifier,
+        string callsign,
+        AircraftPerformanceData performanceData,
+        string originIdentifier,
+        DateTimeOffset takeoffTime)
     {
-        return sequence.NextRunwayMode is not null &&
-               sequence.FirstLandingTimeForNextMode.IsSameOrBefore(time)
-            ? sequence.NextRunwayMode
-            : sequence.CurrentRunwayMode;
+        // Calculate the landing estimate based on the provided TakeOffTime + configured ETI
+        var enrouteTime = CalculateEnrouteTime(
+            airportConfiguration,
+            originIdentifier,
+            performanceData);
+        var landingEstimate = takeoffTime.Add(enrouteTime);
+
+        var runway = FindRunway(
+            session.Sequence,
+            landingEstimate,
+            []);
+
+        // Check if flight already exists in sequence
+        CheckAndRemoveExistingFlight(session.Sequence, callsign);
+
+        var existingPendingFlight = session.PendingFlights.SingleOrDefault(f =>
+            f.Callsign == callsign &&
+            f.IsFromDepartureAirport);
+
+        Flight flight;
+        if (existingPendingFlight is null)
+        {
+            // Create a dummy flight if a pending flight couldn't be found
+            var trajectory = trajectoryService.GetTrajectory(
+                performanceData,
+                airportIdentifier,
+                null,
+                runway.Identifier,
+                runway.ApproachType);
+
+            // TODO: test case - When inserting a dummy flight, from a departure airport, the FeederFixEstimate is TakeOffTime + DepartureETI - Trajectory.TimeToGo
+            flight = new Flight(
+                callsign: callsign,
+                aircraftType: performanceData.TypeCode,
+                aircraftCategory: performanceData.AircraftCategory,
+                wakeCategory: performanceData.WakeCategory,
+                destinationIdentifier: airportIdentifier,
+                assignedRunwayIdentifier: runway.Identifier,
+                approachType: runway.ApproachType,
+                trajectory: trajectory,
+                targetLandingTime: landingEstimate,
+                state: State.Stable);
+        }
+        else
+        {
+            session.PendingFlights.Remove(existingPendingFlight);
+
+            flight = CreateFlightFromPending(
+                existingPendingFlight,
+                session,
+                airportConfiguration,
+                airportIdentifier,
+                performanceData,
+                runway,
+                landingEstimate);
+
+            // Departures remain unstable as their landing estimate will become more accurate as they depart, couple, and climb
+            flight.SetState(airportConfiguration.DefaultDepartureFlightState, clock);
+        }
+
+        // Departures can't overtake SuperStable flights, but they can overtake Unstable and Stable flights
+        var earliestInsertionIndex = session.Sequence.FindLastIndex(f =>
+            f.State is not State.Unstable and not State.Stable &&
+            f.AssignedRunwayIdentifier == runway.Identifier) + 1;
+
+        // Determine the insertion point by landing estimate (ETA)
+        var insertionIndex = session.Sequence.FindIndex(
+            earliestInsertionIndex,
+            f => f.LandingEstimate.IsAfter(flight.LandingEstimate));
+        if (insertionIndex == -1)
+            insertionIndex = Math.Min(earliestInsertionIndex, session.Sequence.Flights.Count);
+
+        session.Sequence.Insert(insertionIndex, flight);
+
+        // Freeze dummy flights as soon as they've been scheduled
+        if (flight.IsManuallyInserted)
+        {
+            flight.SetState(airportConfiguration.DefaultDummyFlightState, clock);
+        }
+
+        return flight;
     }
 
-    private static TimeSpan GetTimeSeparationForRunway(RunwayMode runwayMode, string runwayIdentifier)
+    /// <summary>
+    /// Creates a full <see cref="Flight"/> from a <see cref="PendingFlight"/> record by looking up
+    /// the latest <see cref="FlightDataRecord"/>..
+    /// </summary>
+    Flight CreateFlightFromPending(
+        PendingFlight pendingFlight,
+        Session session,
+        AirportConfiguration airportConfiguration,
+        string airportIdentifier,
+        AircraftPerformanceData performanceData,
+        Runway runway,
+        DateTimeOffset landingEstimate)
     {
-        var runway = runwayMode.Runways.FirstOrDefault(r => r.Identifier == runwayIdentifier);
+        session.FlightDataRecords.TryGetValue(pendingFlight.Callsign, out var flightDataRecord);
 
-        // Default to 60 seconds if runway not found
-        // TODO: Log a warning and make this configurable
-        var landingRateSeconds = runway?.LandingRateSeconds ?? 60;
+        var feederFix = flightDataRecord?.Estimates.LastOrDefault(x => airportConfiguration.FeederFixes.Contains(x.FixIdentifier));
 
-        return TimeSpan.FromSeconds(landingRateSeconds);
+        var trajectory = trajectoryService.GetTrajectory(
+            performanceData,
+            airportIdentifier,
+            feederFix?.FixIdentifier,
+            runway.Identifier,
+            runway.ApproachType);
+
+        // Use the live feeder fix estimate only when coupled to a radar track.
+        // For uncoupled flights, estimates can be inaccurate, so we'll use the calculated landingEstimate
+        // for exact/relative insertions, or takeoff time + ETI for departures, and derive FeederFixEstimate
+        // from landingEstimate - TTG.
+        // Live updates via FlightUpdatedHandler will refine both estimates once the flight couples.
+        var feederFixEstimate = flightDataRecord?.Position is not null ? feederFix?.Estimate : null;
+
+        var flight = new Flight(
+            callsign: pendingFlight.Callsign,
+            aircraftType: performanceData.TypeCode,
+            aircraftCategory: performanceData.AircraftCategory,
+            wakeCategory: performanceData.WakeCategory,
+            destinationIdentifier: airportIdentifier,
+            originIdentifier: flightDataRecord?.Origin,
+            isFromDepartureAirport: pendingFlight.IsFromDepartureAirport,
+            estimatedDepartureTime: flightDataRecord?.EstimatedDepartureTime,
+            assignedRunwayIdentifier: runway.Identifier,
+            approachType: runway.ApproachType,
+            trajectory: trajectory,
+            feederFixIdentifier: feederFix?.FixIdentifier,
+            feederFixEstimate: feederFixEstimate,
+            landingEstimate: landingEstimate,
+            activatedTime: clock.UtcNow(),
+            position: flightDataRecord?.Position);
+
+        return flight;
+    }
+
+    TimeSpan CalculateEnrouteTime(
+        AirportConfiguration airportConfiguration,
+        string departureIdentifier,
+        AircraftPerformanceData performanceData)
+    {
+        var departureConfigurations = airportConfiguration.DepartureAirports
+            .Where(d => d.Identifier == departureIdentifier && d.Aircraft.Matches(performanceData))
+            .ToArray();
+
+        if (departureConfigurations.Length == 0)
+        {
+            var average = airportConfiguration.DepartureAirports.Average(d => d.EstimatedFlightTimeMinutes);
+            return TimeSpan.FromMinutes(average);
+        }
+
+        // TODO: Log a warning on multiple matches
+        return TimeSpan.FromMinutes(departureConfigurations.Average(d => d.EstimatedFlightTimeMinutes));
+    }
+
+    Runway FindRunway(
+        Sequence sequence,
+        DateTimeOffset targetLandingTime,
+        string[] requestedRunwayIdentifiers)
+    {
+        var runwayMode = sequence.GetRunwayModeAt(targetLandingTime);
+        var runway = runwayMode.Runways.FirstOrDefault(r => requestedRunwayIdentifiers.Contains(r.Identifier));
+        return runway ?? runwayMode.Default;
+    }
+
+    void CheckAndRemoveExistingFlight(Sequence sequence, string callsign)
+    {
+        var existingFlight = sequence.FindFlight(callsign);
+        if (existingFlight is null)
+            return;
+
+        if (existingFlight.State != State.Landed)
+            throw new MaestroException($"Cannot insert {callsign} as it already exists in the sequence");
+
+        sequence.Remove(existingFlight);
     }
 }

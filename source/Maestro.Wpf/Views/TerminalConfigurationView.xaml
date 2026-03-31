@@ -10,9 +10,9 @@
              mc:Ignorable="d"
              Background="{x:Static local:Theme.BackgroundColor}"
              d:DataContext="{d:DesignInstance Type=viewModels:TerminalConfigurationViewModel}"
-             d:DesignHeight="300"
-             Width="440"
-             Padding="4">
+             MinWidth="440"
+             MinHeight="240"
+             Padding="8">
     <UserControl.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
@@ -47,7 +47,7 @@
         <Border Padding="0,2,0,0" />
         <controls:BeveledBorder BorderThickness="{x:Static local:Theme.BeveledBorderThickness}" BevelType="Sunken">
             <Border Padding="2">
-                <ItemsControl ItemsSource="{Binding Path=SelectedRunwayMode.Runways}" Margin="2">
+                <ItemsControl ItemsSource="{Binding Path=RunwayConfigurationItems}" Margin="2">
                     <ItemsControl.ItemsPanel>
                         <ItemsPanelTemplate>
                             <StackPanel Orientation="Vertical" />
@@ -70,8 +70,11 @@
                                     <TextBlock Text=": "/>
                                     <TextBlock Text="{Binding LandingRateSeconds}" Padding="4,0,2,0"/>
                                     <TextBlock Text="s"/>
-                                    <!-- TODO: Nautical miles -->
-                                    <!-- TODO: Hourly rate -->
+                                    <TextBlock Text="/"/>
+                                    <TextBlock Text="{Binding NauticalMiles, StringFormat='{}{0:0.0}'}" Padding="4,0,2,0"/>
+                                    <TextBlock Text="NM"/>
+                                    <TextBlock Text="/"/>
+                                    <TextBlock Text="{Binding AircraftPerHour}" Padding="4,0,2,0"/>
                                 </StackPanel>
                             </StackPanel>
 

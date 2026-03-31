@@ -1,30 +1,70 @@
-﻿using Maestro.Core.Messages;
-using Maestro.Core.Model;
+﻿using Maestro.Contracts.Flights;
+using Maestro.Contracts.Sessions;
+using Maestro.Contracts.Shared;
+using Maestro.Core.Connectivity;
+using Maestro.Core.Extensions;
+using Maestro.Core.Hosting;
 using MediatR;
 using Serilog;
 
 namespace Maestro.Core.Handlers;
 
-public class ResumeSequencingRequestHandler(ISequenceProvider sequenceProvider, IScheduler scheduler, IMediator mediator, ILogger logger)
-    : IRequestHandler<ResumeSequencingRequest, ResumeSequencingResponse>
+public class ResumeSequencingRequestHandler(
+    IMaestroInstanceManager instanceManager,
+    IMaestroConnectionManager connectionManager,
+    IMediator mediator,
+    ILogger logger)
+    : IRequestHandler<ResumeSequencingRequest>
 {
-    public async Task<ResumeSequencingResponse> Handle(ResumeSequencingRequest request, CancellationToken cancellationToken)
+    public async Task Handle(ResumeSequencingRequest request, CancellationToken cancellationToken)
     {
-        using (var lockedSequence = await sequenceProvider.GetSequence(request.AirportIdentifier, cancellationToken))
+        if (connectionManager.TryGetConnection(request.AirportIdentifier, out var connection) &&
+            connection.IsConnected &&
+            !connection.IsMaster)
         {
-            var flight = lockedSequence.Sequence.FindTrackedFlight(request.Callsign);
-            if (flight is null)
-            {
-                logger.Warning("Sequence not found for airport {AirportIdentifier}.", request.AirportIdentifier);
-                return new ResumeSequencingResponse();
-            }
-
-            flight.Resume();
+            logger.Information("Relaying ResumeSequencingRequest for {AirportIdentifier}", request.AirportIdentifier);
+            await connection.Invoke(request, cancellationToken);
+            return;
         }
 
-        // Let the RecomputeRequestHandler do the scheduling and notification
-        await mediator.Send(new RecomputeRequest(request.AirportIdentifier, request.Callsign), cancellationToken);
+        var instance = await instanceManager.GetInstance(request.AirportIdentifier, cancellationToken);
+        SessionDto sessionDto;
 
-        return new ResumeSequencingResponse();
+        using (await instance.Semaphore.LockAsync(cancellationToken))
+        {
+            var sequence = instance.Session.Sequence;
+
+            var flight = instance.Session.DeSequencedFlights.SingleOrDefault(f => f.Callsign == request.Callsign);
+            if (flight is null)
+                throw new MaestroException($"{request.Callsign} was not found in the desequenced list.");
+
+            var runwayMode = sequence.GetRunwayModeAt(flight.LandingEstimate);
+            var runway = runwayMode.Runways.FirstOrDefault(r => r.Identifier == flight.AssignedRunwayIdentifier) ??
+                         runwayMode.Default;
+
+            // TODO: If the runway mode has changed since the flight was desequenced, re-assign the runway based on the flights feeder fix
+
+            // Don't insert the flight in front of any SuperStable, Frozen, or Landed flights
+            var earliestInsertionIndex = sequence.FindLastIndex(f =>
+                f.State is not State.Unstable and not State.Stable &&
+                f.AssignedRunwayIdentifier == runway.Identifier) + 1;
+
+            var index = sequence.FindIndex(
+                earliestInsertionIndex,
+                f => f.LandingEstimate.IsBefore(flight.LandingEstimate)) + 1;
+
+            sequence.Insert(Math.Max(earliestInsertionIndex, index), flight);
+            instance.Session.DeSequencedFlights.Remove(flight);
+
+            logger.Information("Flight {Callsign} resumed for {AirportIdentifier}", request.Callsign, request.AirportIdentifier);
+
+            sessionDto = instance.Session.Snapshot();
+        }
+
+        await mediator.Publish(
+            new SessionUpdatedNotification(
+                instance.AirportIdentifier,
+                sessionDto),
+            cancellationToken);
     }
 }

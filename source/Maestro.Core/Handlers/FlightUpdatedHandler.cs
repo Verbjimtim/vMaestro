@@ -1,32 +1,25 @@
-﻿using Maestro.Core.Configuration;
+using Maestro.Contracts.Coordination;
+using Maestro.Contracts.Flights;
+using Maestro.Contracts.Sessions;
+using Maestro.Contracts.Shared;
+using Maestro.Core.Configuration;
+using Maestro.Core.Connectivity;
 using Maestro.Core.Extensions;
+using Maestro.Core.Hosting;
 using Maestro.Core.Infrastructure;
-using Maestro.Core.Messages;
+using Maestro.Core.Integration;
 using Maestro.Core.Model;
 using MediatR;
 using Serilog;
 
 namespace Maestro.Core.Handlers;
 
-public record FlightUpdatedNotification(
-    string Callsign,
-    string AircraftType,
-    WakeCategory WakeCategory,
-    string Origin,
-    string Destination,
-    DateTimeOffset EstimatedDepartureTime,
-    TimeSpan EstimatedFlightTime,
-    string? AssignedArrival,
-    FlightPosition? Position,
-    FixEstimate[] Estimates)
-    : INotification;
-
 public class FlightUpdatedHandler(
-    ISequenceProvider sequenceProvider,
+    IMaestroInstanceManager instanceManager,
+    IMaestroConnectionManager connectionManager,
     IFlightUpdateRateLimiter rateLimiter,
     IAirportConfigurationProvider airportConfigurationProvider,
-    IEstimateProvider estimateProvider,
-    IScheduler scheduler,
+    ITrajectoryService trajectoryService,
     IMediator mediator,
     IClock clock,
     ILogger logger)
@@ -36,105 +29,217 @@ public class FlightUpdatedHandler(
     {
         try
         {
-            if (!sequenceProvider.CanSequenceFor(notification.Destination))
+            if (!instanceManager.InstanceExists(notification.Destination))
                 return;
 
-            logger.Verbose("Received update for {Callsign}", notification.Callsign);
+            logger.Verbose("FDR update received for {Callsign}", notification.Callsign);
 
-            using var lockedSequence = await sequenceProvider.GetSequence(notification.Destination, cancellationToken);
-            var sequence = lockedSequence.Sequence;
+            var instance = await instanceManager.GetInstance(notification.Destination, cancellationToken);
+            SessionDto sessionDto;
 
-            var airportConfiguration = airportConfigurationProvider.GetAirportConfigurations()
-                .Single(a => a.Identifier == notification.Destination);
-
-            var flight = sequence.FindTrackedFlight(notification.Callsign);
-            if (flight is null)
+            using (await instance.Semaphore.LockAsync(cancellationToken))
             {
-                // TODO: Make configurable
-                var flightCreationThreshold = TimeSpan.FromHours(2);
+                // Check each list individually to find the flight
+                var sequencedFlight = instance.Session.Sequence.FindFlight(notification.Callsign);
+                var pendingFlight = instance.Session.PendingFlights.SingleOrDefault(f => f.Callsign == notification.Callsign);
+                var desequencedFlight = instance.Session.DeSequencedFlights.SingleOrDefault(f => f.Callsign == notification.Callsign);
 
-                var feederFix = notification.Estimates.LastOrDefault(x => sequence.FeederFixes.Contains(x.FixIdentifier));
-                var landingEstimate = notification.Estimates.Last().Estimate;
-                var hasDeparted = notification.Position is not null && !notification.Position.IsOnGround;
+                var isKnownFlight = sequencedFlight is not null || pendingFlight is not null || desequencedFlight is not null;
 
-                // Flights are added to the pending list if they are departing from a configured departure airport
-                if (airportConfiguration.DepartureAirports.Contains(notification.Origin) && !hasDeparted)
+                // Rate-limit updates for known flights using the last seen time from the store
+                if (isKnownFlight &&
+                    instance.Session.FlightDataRecords.TryGetValue(notification.Callsign, out var existingData))
                 {
-                    flight = CreateMaestroFlight(
-                        notification,
-                        feederFix,
-                        landingEstimate);
+                    if (!rateLimiter.ShouldUpdate(existingData.LastSeen))
+                    {
+                        logger.Verbose("FDR update for {Callsign} rate-limited", notification.Callsign);
+                        return;
+                    }
+                }
 
-                    flight.IsFromDepartureAirport = true;
-                    flight.SetState(State.Pending, clock);
-                    sequence.AddFlight(flight, scheduler);
-
-                    logger.Information("{Callsign} created (pending)", notification.Callsign);
+                if (connectionManager.TryGetConnection(notification.Destination, out var connection) &&
+                     connection.IsConnected &&
+                     !connection.IsMaster)
+                {
+                    logger.Verbose("Relaying FlightUpdatedNotification for {Callsign}", notification.Callsign);
+                    await connection.Send(notification, cancellationToken);
                     return;
                 }
 
-                // TODO: Determine if this behaviour is correct
-                if (!hasDeparted)
+                // Always update the flight data store with the latest data
+                var flightData = new FlightDataRecord(
+                    notification.Callsign,
+                    notification.AircraftType,
+                    notification.AircraftCategory,
+                    notification.WakeCategory,
+                    notification.Origin,
+                    notification.Destination,
+                    notification.EstimatedDepartureTime,
+                    notification.Position,
+                    notification.Estimates,
+                    clock.UtcNow());
+                instance.Session.FlightDataRecords[notification.Callsign] = flightData;
+
+                var airportConfiguration = airportConfigurationProvider.GetAirportConfiguration(notification.Destination);
+                if (!isKnownFlight)
+                {
+                    var isFromDepartureAirport = airportConfiguration.DepartureAirports.Any(d => d.Identifier == notification.Origin);
+                    var hasDeparted = notification.Position is not null && !notification.Position.IsOnGround;
+                    var feederFix = notification.Estimates.LastOrDefault(x => airportConfiguration.FeederFixes.Contains(x.FixIdentifier));
+                    var feederFixEstimateIsKnown = feederFix?.Estimate != null;
+                    var approximateLandingEstimate = notification.Estimates.LastOrDefault()?.Estimate;
+
+                    // Flights go to the pending list if they cannot be auto-inserted into the sequence:
+                    // - Departure airport flights that haven't yet departed
+                    // - Flights with no matching feeder fix
+                    // - Flights with a feeder fix but no known estimate
+                    // - Flights with no landing estimate at all
+                    var addToPending = (isFromDepartureAirport && !hasDeparted)
+                        || feederFix is null
+                        || !feederFixEstimateIsKnown
+                        || approximateLandingEstimate is null;
+
+                    if (addToPending)
+                    {
+                        var newPendingFlight = new PendingFlight(
+                            notification.Callsign,
+                            IsFromDepartureAirport: isFromDepartureAirport,
+                            IsHighPriority: feederFix is null);
+
+                        instance.Session.PendingFlights.Add(newPendingFlight);
+
+                        logger.Information("Added {Callsign} to the pending list", notification.Callsign);
+
+                        await mediator.Send(new SendCoordinationMessageRequest(
+                            notification.Destination,
+                            clock.UtcNow(),
+                            $"{notification.Callsign} added to pending list",
+                            new CoordinationDestination.Broadcast()),
+                            cancellationToken);
+
+                        return;
+                    }
+
+                    // A flight is only added to the sequence once it is correlated to a radar track and airborne
+                    if (!hasDeparted)
+                        return;
+
+                    // Only insert into the sequence once the feeder fix estimate is within the creation threshold
+                    var flightCreationThreshold = TimeSpan.FromMinutes(airportConfiguration.FlightCreationThresholdMinutes);
+
+                    // Safe to unwrap as we exit early when adding flights to the Pending list
+                    // If the feederFix is null, the flight should be added to the Pending list
+                    if (feederFix!.Estimate - clock.UtcNow() > flightCreationThreshold)
+                        return;
+
+                    // Use the default runway for now. This will get re-calculated in the scheduling phase.
+                    var runwayMode = instance.Session.Sequence.GetRunwayModeAt(approximateLandingEstimate!.Value);
+                    var runway = runwayMode.Default;
+
+                    var trajectory = trajectoryService.GetTrajectory(
+                        new AircraftPerformanceData(notification.AircraftType, notification.AircraftCategory, notification.WakeCategory),
+                        notification.Destination,
+                        feederFix.FixIdentifier,
+                        runway.Identifier,
+                        runway.ApproachType);
+
+                    // New flights can be inserted in front of existing Unstable and Stable flights on the same runway
+                    var earliestInsertionIndex = instance.Session.Sequence.FindLastIndex(f =>
+                        f.State is not State.Unstable and not State.Stable &&
+                        f.AssignedRunwayIdentifier == runway.Identifier) + 1;
+
+                    var insertionIndex = instance.Session.Sequence.FindIndex(
+                        earliestInsertionIndex,
+                        f => f.LandingEstimate.IsAfter(approximateLandingEstimate.Value));
+
+                    if (insertionIndex == -1)
+                        insertionIndex = Math.Min(earliestInsertionIndex, instance.Session.Sequence.Flights.Count);
+
+                    sequencedFlight = new Flight(
+                        callsign: notification.Callsign,
+                        aircraftType: notification.AircraftType,
+                        aircraftCategory: notification.AircraftCategory,
+                        wakeCategory: notification.WakeCategory,
+                        destinationIdentifier: notification.Destination,
+                        originIdentifier: notification.Origin,
+                        isFromDepartureAirport: isFromDepartureAirport,
+                        estimatedDepartureTime: notification.EstimatedDepartureTime,
+                        assignedRunwayIdentifier: runway.Identifier,
+                        approachType: runway.ApproachType,
+                        trajectory: trajectory,
+                        feederFixIdentifier: feederFix.FixIdentifier,
+                        feederFixEstimate: feederFix.Estimate,
+                        landingEstimate: approximateLandingEstimate.Value,
+                        activatedTime: clock.UtcNow(),
+                        position: notification.Position);
+
+                    instance.Session.Sequence.Insert(insertionIndex, sequencedFlight);
+                    logger.Information("{Callsign} added to the sequence", notification.Callsign);
                     return;
-
-                // Only create flights in Maestro when they're within a specified range of the feeder fix
-                if (feederFix is not null && feederFix.Estimate - clock.UtcNow() <= flightCreationThreshold)
-                {
-                    flight = CreateMaestroFlight(
-                        notification,
-                        feederFix,
-                        landingEstimate);
-
-                    flight.SetState(State.New, clock);
-                    sequence.AddFlight(flight, scheduler);
-                    logger.Information("{Callsign} created", notification.Callsign);
                 }
-                // Flights not tracking a feeder fix are created with high priority
-                else if (feederFix is null && landingEstimate - clock.UtcNow() <= flightCreationThreshold)
+
+                // Handle pending flights: data is already updated in the store, nothing else to do
+                if (pendingFlight is not null)
                 {
-                    flight = CreateMaestroFlight(
-                        notification,
-                        null,
-                        landingEstimate);
-
-                    flight.HighPriority = true;
-
-                    flight.SetState(State.New, clock);
-                    sequence.AddFlight(flight, scheduler);
-                    logger.Information("{Callsign} created (high priority)", notification.Callsign);
+                    logger.Verbose("Pending flight data updated: {Callsign}", pendingFlight.Callsign);
                 }
+                // Handle desequenced flights: update flight data and calculate estimates
+                else if (desequencedFlight is not null)
+                {
+                    desequencedFlight.UpdateLastSeen(clock);
+                    UpdateFlightData(notification, desequencedFlight);
+                    CalculateEstimates(desequencedFlight, notification);
+
+                    desequencedFlight.UpdateStateBasedOnTime(clock, airportConfiguration);
+                    logger.Verbose("Desequenced flight updated: {Flight}", desequencedFlight);
+                }
+                // Handle sequenced flights: update flight data, calculate estimates, and reposition if unstable
+                else if (sequencedFlight is not null)
+                {
+                    sequencedFlight.UpdateLastSeen(clock);
+                    UpdateFlightData(notification, sequencedFlight);
+                    CalculateEstimates(sequencedFlight, notification);
+
+                    // Unstable flights are repositioned in the sequence on every update
+                    if (sequencedFlight.State is State.Unstable)
+                    {
+                        // Do not overtake any stable flights
+                        var currentIndex = instance.Session.Sequence.IndexOf(sequencedFlight);
+                        var earliestIndex = instance.Session.Sequence.FindLastIndex(
+                            currentIndex,
+                            f => f.AssignedRunwayIdentifier == sequencedFlight.AssignedRunwayIdentifier &&
+                                 f.State != State.Unstable) + 1;
+
+                        var desiredIndex = instance.Session.Sequence.FindIndex(f =>
+                            f.LandingEstimate.IsAfter(sequencedFlight.LandingEstimate));
+
+                        var newIndex = desiredIndex == -1
+                            ? instance.Session.Sequence.Flights.Count // No flight has a later estimate - move to end of sequence
+                            : desiredIndex;
+
+                        // Cannot move before stable flights that are currently before us
+                        if (newIndex < earliestIndex)
+                            newIndex = earliestIndex;
+
+                        if (newIndex != currentIndex)
+                        {
+                            sequencedFlight.InvalidateSequenceData();
+                            instance.Session.Sequence.Move(sequencedFlight, newIndex);
+                        }
+                    }
+
+                    sequencedFlight.UpdateStateBasedOnTime(clock, airportConfiguration);
+
+                    logger.Verbose("Flight updated: {Flight}", sequencedFlight);
+                }
+
+                sessionDto = instance.Session.Snapshot();
             }
-
-            if (flight is null)
-                return;
-
-            // Only apply rate limiting if a position is available
-            // When no position is available (i.e. Not coupled to a radar track), we accept all updates
-            if (notification.Position is not null)
-            {
-                var shouldUpdate = rateLimiter.ShouldUpdateFlight(flight, notification.Position);
-                if (!shouldUpdate)
-                {
-                    logger.Verbose("Rate limiting {Callsign}", notification.Callsign);
-                    return;
-                }
-            }
-
-            logger.Debug("Updating {Callsign}", notification.Callsign);
-
-            UpdateFlightData(notification, flight);
-            flight.UpdatePosition(notification.Position);
-
-            // Only update the estimates if the flight is coupled to a radar track, and it's not on the ground
-            if (notification.Position is not null && !notification.Position.IsOnGround)
-                    CalculateEstimates(flight, notification, airportConfiguration);
-
-            flight.UpdateLastSeen(clock);
-
-            logger.Debug("Flight updated: {Flight}", flight);
 
             await mediator.Publish(
-                new SequenceUpdatedNotification(sequence.AirportIdentifier, sequence.ToMessage()),
+                new SessionUpdatedNotification(
+                    instance.AirportIdentifier,
+                    sessionDto),
                 cancellationToken);
         }
         catch (Exception exception)
@@ -143,88 +248,61 @@ public class FlightUpdatedHandler(
         }
     }
 
-    void CalculateEstimates(Flight flight, FlightUpdatedNotification notification, AirportConfiguration airportConfiguration)
+    void CalculateEstimates(Flight flight, FlightUpdatedNotification notification)
     {
-        var feederFixSystemEstimate = notification.Estimates.LastOrDefault(e => e.FixIdentifier == flight.FeederFixIdentifier);
-        if (!flight.HasPassedFeederFix && feederFixSystemEstimate?.ActualTimeOver is not null)
-        {
-            flight.PassedFeederFix(feederFixSystemEstimate.ActualTimeOver.Value);
-            logger.Information(
-                "{Callsign} passed {FeederFix} at {ActualTimeOver}",
-                flight.Callsign,
-                flight.FeederFixIdentifier,
-                feederFixSystemEstimate.ActualTimeOver);
-        }
+        if (flight.ManualFeederFixEstimate)
+            return;
 
-        // Don't update ETA_FF once passed FF, or if a manual estimate is set
-        if ((feederFixSystemEstimate is not null && !flight.HasPassedFeederFix) || flight.ManualFeederFixEstimate)
+        // Only update the estimates if the flight is coupled to a radar track, and it's not on the ground
+        if (flight.Position is null || flight.Position.IsOnGround)
+            return;
+
+        if (!string.IsNullOrEmpty(flight.FeederFixIdentifier))
         {
-            var calculatedFeederFixEstimate = estimateProvider.GetFeederFixEstimate(
-                airportConfiguration,
-                flight.FeederFixIdentifier!,
-                feederFixSystemEstimate!.Estimate,
-                notification.Position);
-            if (calculatedFeederFixEstimate is not null && flight.EstimatedFeederFixTime is not null)
+            var feederFixSystemEstimate = notification.Estimates.LastOrDefault(e => e.FixIdentifier == flight.FeederFixIdentifier);
+            if (feederFixSystemEstimate?.Estimate != null)
             {
-                var diff = flight.EstimatedFeederFixTime.Value - calculatedFeederFixEstimate.Value;
-                flight.UpdateFeederFixEstimate(calculatedFeederFixEstimate.Value);
-                logger.Debug(
-                    "{Callsign} ETA_FF now {FeederFixEstimate} (diff {Difference})",
+                logger.Verbose(
+                    "{Callsign} ETA_FF for {FeederFix} now {FeederFixEstimate}",
                     flight.Callsign,
-                    flight.EstimatedFeederFixTime,
-                    diff.ToHoursAndMinutesString());
+                    flight.FeederFixIdentifier,
+                    feederFixSystemEstimate.Estimate);
 
-                if (diff.Duration() > TimeSpan.FromMinutes(2))
-                    logger.Warning("{Callsign} ETA_FF has changed by more than 2 minutes", flight.Callsign);
+                flight.UpdateFeederFixEstimate(feederFixSystemEstimate.Estimate.Value);
+                // Landing estimate automatically calculated using TTG
             }
+
+            // If they have a feeder fix set but no estimate, they've probably passed it, so leave the estimates as-is
+            return;
         }
 
-        var landingSystemEstimate = notification.Estimates.LastOrDefault();
-        var calculatedLandingEstimate = estimateProvider.GetLandingEstimate(flight, landingSystemEstimate?.Estimate);
-        if (calculatedLandingEstimate is not null)
+        // No feeder fix estimate available
+        // Update landing estimate directly, ETA_FF will be calculated using TTG
+        var landingEstimate = notification.Estimates.LastOrDefault()?.Estimate;
+        if (landingEstimate is null)
         {
-            var diff = flight.EstimatedLandingTime - calculatedLandingEstimate.Value;
-            flight.UpdateLandingEstimate(calculatedLandingEstimate.Value);
-            logger.Debug(
-                "{Callsign} ETA now {LandingEstimate} (diff {Difference})",
-                flight.Callsign,
-                flight.EstimatedLandingTime,
-                diff.ToHoursAndMinutesString());
-
-            if (diff.Duration() > TimeSpan.FromMinutes(2))
-                logger.Warning("{Callsign} ETA has changed by more than 2 minutes", flight.Callsign);
+            logger.Warning(
+                "No estimates available for {Callsign}, cannot update estimates",
+                flight.Callsign);
+            return;
         }
-    }
 
-    Flight CreateMaestroFlight(
-        FlightUpdatedNotification notification,
-        FixEstimate? feederFixEstimate,
-        DateTimeOffset landingEstimate)
-    {
-        var flight = new Flight(notification.Callsign, notification.Destination, landingEstimate);
-        UpdateFlightData(notification, flight);
+        logger.Verbose(
+            "{Callsign} (no FF) ETA now {LandingEstimate}",
+            flight.Callsign,
+            landingEstimate);
 
-        if (feederFixEstimate is not null)
-            flight.SetFeederFix(feederFixEstimate.FixIdentifier, feederFixEstimate.Estimate, feederFixEstimate.ActualTimeOver);
-
-        flight.UpdateLandingEstimate(landingEstimate);
-
-        if (feederFixEstimate is null)
-            flight.HighPriority = true;
-
-        return flight;
+        flight.UpdateLandingEstimate(landingEstimate.Value);
     }
 
     void UpdateFlightData(FlightUpdatedNotification notification, Flight flight)
     {
         flight.AircraftType = notification.AircraftType;
+        flight.AircraftCategory = notification.AircraftCategory;
         flight.WakeCategory = notification.WakeCategory;
 
         flight.OriginIdentifier = notification.Origin;
         flight.EstimatedDepartureTime = notification.EstimatedDepartureTime;
-        flight.EstimatedTimeEnroute = notification.EstimatedFlightTime;
-
-        flight.AssignedArrivalIdentifier = notification.AssignedArrival;
-        flight.Fixes = notification.Estimates;
+        flight.UpdatePosition(notification.Position);
     }
 }

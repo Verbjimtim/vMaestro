@@ -30,9 +30,9 @@
         <Setter Property="FontFamily" Value="{x:Static local:Theme.FontFamily}" />
         <Setter Property="FontSize" Value="{x:Static local:Theme.FontSize}" />
         <Setter Property="FontWeight" Value="{x:Static local:Theme.FontWeight}"/>
+        <Setter Property="VerticalAlignment" Value="Center" />
 
         <Setter Property="LineStackingStrategy" Value="BlockLineHeight" />
-        <Setter Property="Height" Value="{Binding Source={x:Static local:Theme.FontSize}, Converter={StaticResource FontSizeToHeightConverter}}" />
         <Setter Property="LineHeight" Value="{Binding Source={x:Static local:Theme.FontSize}, Converter={StaticResource FontSizeToLineHeightConverter}}" />
     </Style>
 
@@ -48,9 +48,12 @@
     <Style x:Key="ButtonBaseStyle" TargetType="{x:Type Button}" BasedOn="{StaticResource ControlBaseStyle}">
 
         <Setter Property="Foreground" Value="{x:Static local:Theme.InteractiveTextColor}" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
 
         <Setter Property="TextBlock.LineStackingStrategy" Value="BlockLineHeight"/>
         <Setter Property="TextBlock.LineHeight" Value="{Binding Source={x:Static local:Theme.FontSize}, Converter={StaticResource FontSizeToLineHeightConverter}}" />
+        <Setter Property="TextBlock.TextAlignment" Value="Center" />
 
         <Setter Property="Template">
             <Setter.Value>
@@ -327,8 +330,14 @@
                     </Grid>
 
                     <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True">
+                        <MultiTrigger>
+                            <MultiTrigger.Conditions>
+                                <Condition Property="IsMouseOver" Value="True"/>
+                                <Condition Property="HasItems" Value="True"/>
+                            </MultiTrigger.Conditions>
                             <Setter Property="IsSubmenuOpen" Value="True"/>
+                        </MultiTrigger>
+                        <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="BevelBorder" Property="Visibility" Value="Visible"/>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">

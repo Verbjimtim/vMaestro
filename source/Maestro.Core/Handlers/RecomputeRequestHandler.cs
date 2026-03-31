@@ -1,7 +1,11 @@
-﻿using Maestro.Core.Configuration;
+﻿using Maestro.Contracts.Flights;
+using Maestro.Contracts.Sessions;
+using Maestro.Contracts.Shared;
+using Maestro.Core.Configuration;
+using Maestro.Core.Connectivity;
 using Maestro.Core.Extensions;
+using Maestro.Core.Hosting;
 using Maestro.Core.Infrastructure;
-using Maestro.Core.Messages;
 using Maestro.Core.Model;
 using MediatR;
 using Serilog;
@@ -9,119 +13,88 @@ using Serilog;
 namespace Maestro.Core.Handlers;
 
 public class RecomputeRequestHandler(
-    ISequenceProvider sequenceProvider,
+    IMaestroInstanceManager instanceManager,
+    IMaestroConnectionManager connectionManager,
     IAirportConfigurationProvider airportConfigurationProvider,
-    IEstimateProvider estimateProvider,
+    ITrajectoryService trajectoryService,
     IClock clock,
-    IScheduler scheduler,
     IMediator mediator,
     ILogger logger)
     : IRequestHandler<RecomputeRequest>
 {
     public async Task Handle(RecomputeRequest request, CancellationToken cancellationToken)
     {
-        using var lockedSequence = await sequenceProvider.GetSequence(request.AirportIdentifier, cancellationToken);
-        var sequence = lockedSequence.Sequence;
-
-        var airportConfiguration = airportConfigurationProvider.GetAirportConfigurations()
-            .Single(a => a.Identifier == request.AirportIdentifier);
-
-        var flight = lockedSequence.Sequence.FindTrackedFlight(request.Callsign);
-        if (flight == null)
+        if (connectionManager.TryGetConnection(request.AirportIdentifier, out var connection) &&
+            connection.IsConnected &&
+            !connection.IsMaster)
         {
-            logger.Warning("Flight {Callsign} not found for airport {AirportIdentifier}.", request.Callsign, request.AirportIdentifier);
+            logger.Information("Relaying RecomputeRequest for {AirportIdentifier}", request.AirportIdentifier);
+            await connection.Invoke(request, cancellationToken);
             return;
         }
 
-        logger.Information("Recomputing {Callsign}", flight.Callsign);
+        var instance = await instanceManager.GetInstance(request.AirportIdentifier, cancellationToken);
+        SessionDto sessionDto;
 
-        // Reset the feeder fix in case of a re-route
-        var feederFix = flight.Fixes.LastOrDefault(x => sequence.FeederFixes.Contains(x.FixIdentifier));
-        if (feederFix is not null)
-            flight.SetFeederFix(feederFix.FixIdentifier, feederFix.Estimate, feederFix.ActualTimeOver);
+        using (await instance.Semaphore.LockAsync(cancellationToken))
+        {
+            var sequence = instance.Session.Sequence;
+            var airportConfiguration = airportConfigurationProvider.GetAirportConfiguration(request.AirportIdentifier);
 
-        flight.HighPriority = feederFix is null;
-        flight.NoDelay = false;
+            var flight = sequence.FindFlight(request.Callsign);
+            if (flight == null)
+            {
+                logger.Warning("Flight {Callsign} not found for airport {AirportIdentifier}.", request.Callsign, request.AirportIdentifier);
+                return;
+            }
 
-        // Re-calculate the estimates
-        CalculateEstimates(airportConfiguration, flight);
-        flight.ResetInitialLandingEstimate();
-        if (feederFix is not null)
-            flight.ResetInitialFeederFixEstimate();
+            // Recalculate the feeder fix in case of a re-route
+            instance.Session.FlightDataRecords.TryGetValue(flight.Callsign, out var flightDataRecord);
+            var feederFix = flightDataRecord?.Estimates.LastOrDefault(x => airportConfiguration.FeederFixes.Contains(x.FixIdentifier));
+            var landingEstimate = flightDataRecord?.Estimates.LastOrDefault()?.Estimate ?? flight.LandingEstimate;
 
-        // Reset scheduled times
-        if (flight.EstimatedFeederFixTime is not null)
-            flight.SetFeederFixTime(flight.EstimatedFeederFixTime.Value);
+            flight.HighPriority = feederFix is null;
+            flight.SetMaximumDelay(null);
 
-        flight.SetLandingTime(flight.EstimatedLandingTime, manual: false);
+            // Reset the runway to the default so it can be calculated in the Scheduling phase
+            var runwayMode = sequence.GetRunwayModeAt(landingEstimate);
+            var runway = runwayMode.Default;
 
-        // Reset the runway
-        var runwayMode = sequence.GetRunwayModeAt(flight.EstimatedLandingTime);
-        flight.SetRunway(runwayMode.Default.Identifier, manual: false);
+            // Lookup trajectory for the (possibly new) feeder fix + default runway + default approach type
+            var trajectory = trajectoryService.GetTrajectory(
+                flight.GetPerformanceData(),
+                flight.DestinationIdentifier,
+                feederFix?.FixIdentifier,
+                runway.Identifier,
+                runway.ApproachType);
 
-        scheduler.Recompute(flight, sequence);
+            // Update feeder fix (may have changed due to re-routing)
+            flight.SetFeederFix(
+                feederFix?.FixIdentifier,
+                trajectory,
+                feederFix?.Estimate,
+                landingEstimate);
 
-        // Progress the state based on the new times
-        flight.UpdateStateBasedOnTime(clock);
+            flight.SetRunway(runway.Identifier, trajectory);
+            flight.SetApproachType(runway.ApproachType, trajectory);
+
+            flight.InvalidateSequenceData();
+
+            // Reset the state
+            flight.SetState(State.Unstable, clock);
+
+            sequence.RepositionByEstimate(flight);
+            flight.UpdateStateBasedOnTime(clock, airportConfiguration);
+
+            logger.Information("{Callsign} recomputed", flight.Callsign);
+
+            sessionDto = instance.Session.Snapshot();
+        }
 
         await mediator.Publish(
-            new SequenceUpdatedNotification(
-                lockedSequence.Sequence.AirportIdentifier,
-                lockedSequence.Sequence.ToMessage()),
+            new SessionUpdatedNotification(
+                instance.AirportIdentifier,
+                sessionDto),
             cancellationToken);
-    }
-
-    // TODO: This is copied from FlightUpdatedHandler, consider refactoring
-    void CalculateEstimates(AirportConfiguration airportConfiguration, Flight flight)
-    {
-        var feederFixSystemEstimate = flight.Fixes.LastOrDefault(e => e.FixIdentifier == flight.FeederFixIdentifier);
-        if (!flight.HasPassedFeederFix && feederFixSystemEstimate?.ActualTimeOver is not null)
-        {
-            flight.PassedFeederFix(feederFixSystemEstimate.ActualTimeOver.Value);
-            logger.Information(
-                "{Callsign} passed {FeederFix} at {ActualTimeOver}",
-                flight.Callsign,
-                flight.FeederFixIdentifier,
-                feederFixSystemEstimate.ActualTimeOver);
-        }
-
-        // Don't update ETA_FF once passed FF
-        if (feederFixSystemEstimate is not null && !flight.HasPassedFeederFix)
-        {
-            var calculatedFeederFixEstimate = estimateProvider.GetFeederFixEstimate(
-                airportConfiguration,
-                flight.FeederFixIdentifier!,
-                feederFixSystemEstimate!.Estimate,
-                flight.Position);
-            if (calculatedFeederFixEstimate is not null && flight.EstimatedFeederFixTime is not null)
-            {
-                var diff = flight.EstimatedFeederFixTime.Value - calculatedFeederFixEstimate.Value;
-                flight.UpdateFeederFixEstimate(calculatedFeederFixEstimate.Value);
-                logger.Debug(
-                    "{Callsign} ETA_FF now {FeederFixEstimate} (diff {Difference})",
-                    flight.Callsign,
-                    flight.EstimatedFeederFixTime,
-                    diff.ToHoursAndMinutesString());
-
-                if (diff.Duration() > TimeSpan.FromMinutes(2))
-                    logger.Warning("{Callsign} ETA_FF has changed by more than 2 minutes", flight.Callsign);
-            }
-        }
-
-        var landingSystemEstimate = flight.Fixes.LastOrDefault();
-        var calculatedLandingEstimate = estimateProvider.GetLandingEstimate(flight, landingSystemEstimate?.Estimate);
-        if (calculatedLandingEstimate is not null)
-        {
-            var diff = flight.EstimatedLandingTime - calculatedLandingEstimate.Value;
-            flight.UpdateLandingEstimate(calculatedLandingEstimate.Value);
-            logger.Debug(
-                "{Callsign} ETA now {LandingEstimate} (diff {Difference})",
-                flight.Callsign,
-                flight.EstimatedLandingTime,
-                diff.ToHoursAndMinutesString());
-
-            if (diff.Duration() > TimeSpan.FromMinutes(2))
-                logger.Warning("{Callsign} ETA has changed by more than 2 minutes", flight.Callsign);
-        }
     }
 }

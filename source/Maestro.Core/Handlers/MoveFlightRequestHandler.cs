@@ -1,119 +1,97 @@
-﻿using Maestro.Core.Configuration;
+﻿using Maestro.Contracts.Flights;
+using Maestro.Contracts.Sessions;
+using Maestro.Contracts.Shared;
+using Maestro.Core.Configuration;
+using Maestro.Core.Connectivity;
 using Maestro.Core.Extensions;
+using Maestro.Core.Hosting;
 using Maestro.Core.Infrastructure;
-using Maestro.Core.Messages;
 using Maestro.Core.Model;
 using MediatR;
+using Serilog;
 
 namespace Maestro.Core.Handlers;
 
-public record MoveFlightRequest(
-    string AirportIdentifier,
-    string Callsign,
-    string[] RunwayIdentifiers,
-    DateTimeOffset NewLandingTime)
-    : IRequest;
-
 public class MoveFlightRequestHandler(
-    ISequenceProvider sequenceProvider,
-    IScheduler scheduler,
+    IMaestroInstanceManager instanceManager,
+    IMaestroConnectionManager connectionManager,
+    IAirportConfigurationProvider airportConfigurationProvider,
+    ITrajectoryService trajectoryService,
     IMediator mediator,
-    IClock clock)
+    IClock clock,
+    ILogger logger)
     : IRequestHandler<MoveFlightRequest>
 {
     public async Task Handle(MoveFlightRequest request, CancellationToken cancellationToken)
     {
-        using var exclusiveSequence = await sequenceProvider.GetSequence(request.AirportIdentifier, cancellationToken);
-        var sequence = exclusiveSequence.Sequence;
-
-        var flight = sequence.FindTrackedFlight(request.Callsign);
-        if (flight is null)
-            return;
-
-        var runwayMode = sequence.GetRunwayModeAt(request.NewLandingTime);
-        var runwayConfig = runwayMode.Runways
-            .FirstOrDefault(r => request.RunwayIdentifiers.Contains(r.Identifier));
-        if (runwayConfig is null)
-            runwayConfig = runwayMode.Default;
-
-        var optimizedLandingTime = OptimizeLandingTime(
-            sequence,
-            flight,
-            runwayConfig,
-            request.NewLandingTime);
-
-        flight.SetLandingTime(optimizedLandingTime, manual: true);
-        flight.SetRunway(runwayConfig.Identifier, manual: true);
-        if (!string.IsNullOrEmpty(flight.FeederFixIdentifier) && flight.EstimatedFeederFixTime is not null && !flight.HasPassedFeederFix)
+        if (connectionManager.TryGetConnection(request.AirportIdentifier, out var connection) &&
+            connection.IsConnected &&
+            !connection.IsMaster)
         {
-            var totalDelay = optimizedLandingTime - flight.EstimatedLandingTime;
-            var feederFixTime = flight.EstimatedFeederFixTime.Value + totalDelay;
-            flight.SetFeederFixTime(feederFixTime);
+            logger.Information("Relaying MoveFlightRequest for {AirportIdentifier}", request.AirportIdentifier);
+            await connection.Invoke(request, cancellationToken);
+            return;
         }
 
-        // Unstable flights become stable when moved
-        if (flight.State == State.Unstable)
-            flight.SetState(State.Stable, clock);
+        var instance = await instanceManager.GetInstance(request.AirportIdentifier, cancellationToken);
+        SessionDto sessionDto;
 
-        scheduler.Schedule(sequence);
+        var airportConfiguration = airportConfigurationProvider.GetAirportConfiguration(request.AirportIdentifier);
+        using (await instance.Semaphore.LockAsync(cancellationToken))
+        {
+            var sequence = instance.Session.Sequence;
+            var flight = sequence.FindFlight(request.Callsign);
+            if (flight is null)
+                throw new MaestroException($"{request.Callsign} not found");
+
+            var newIndex = sequence.IndexOf(request.NewLandingTime);
+
+            flight.SetTargetLandingTime(request.NewLandingTime);
+
+            var runwayMode = sequence.GetRunwayModeAt(request.NewLandingTime);
+            var runway = runwayMode.Runways.FirstOrDefault(r => request.RunwayIdentifiers.Contains(r.Identifier))
+                         ?? runwayMode.Default;
+
+            sequence.ThrowIsTimeIsUnavailable(request.Callsign, request.NewLandingTime, runway.Identifier);
+
+            // TODO: Manually set the runway for now, but we need to revisit this later
+            // Re: delaying into a new runway mode
+
+            var fixNames = instance.Session.FlightDataRecords.TryGetValue(flight.Callsign, out var flightDataRecord)
+                ? flightDataRecord.Estimates.Select(x => x.FixIdentifier).ToArray()
+                : [];
+
+            // Lookup trajectory for the new runway and approach before updating flight
+            var trajectory = trajectoryService.GetTrajectory(
+                flight,
+                runway.Identifier,
+                runway.ApproachType,
+                fixNames);
+
+            // Atomic update: runway + trajectory + ETA + STA_FF
+            flight.SetRunway(runway.Identifier, trajectory);
+
+            // Update approach type if it changed
+            if (flight.ApproachType != runway.ApproachType)
+                flight.SetApproachType(runway.ApproachType, trajectory);
+
+            flight.InvalidateSequenceData();
+
+            // Unstable flights become stable when moved
+            if (flight.State == State.Unstable)
+                flight.SetState(airportConfiguration.ManualInteractionState, clock);
+
+            sequence.Move(flight, newIndex);
+
+            logger.Information("Flight {Callsign} moved to {NewLandingTime}", flight.Callsign, flight.LandingTime);
+
+            sessionDto = instance.Session.Snapshot();
+        }
 
         await mediator.Publish(
-            new SequenceUpdatedNotification(
-                sequence.AirportIdentifier,
-                sequence.ToMessage()),
+            new SessionUpdatedNotification(
+                instance.AirportIdentifier,
+                sessionDto),
             cancellationToken);
-    }
-
-    DateTimeOffset OptimizeLandingTime(
-        Sequence sequence,
-        Flight targetFlight,
-        RunwayConfiguration runwayConfiguration,
-        DateTimeOffset targetLandingTime)
-    {
-        var proposedLandingTime = targetLandingTime;
-        var arrivalRate = TimeSpan.FromSeconds(runwayConfiguration.LandingRateSeconds);
-
-        var leader = sequence.Flights
-            .FirstOrDefault(f =>
-                f != targetFlight &&
-                f.AssignedRunwayIdentifier == runwayConfiguration.Identifier &&
-                f.ScheduledLandingTime.IsSameOrBefore(proposedLandingTime));
-
-        var trailer = sequence.Flights
-            .FirstOrDefault(f =>
-                f != targetFlight &&
-                f.AssignedRunwayIdentifier == runwayConfiguration.Identifier &&
-                f.ScheduledLandingTime.IsSameOrAfter(proposedLandingTime));
-
-        if (leader is not null && leader.State == State.Frozen && trailer is not null && trailer.State == State.Frozen)
-        {
-            var timeBetween = trailer.ScheduledLandingTime - leader.ScheduledLandingTime;
-            if (timeBetween.TotalSeconds < runwayConfiguration.LandingRateSeconds * 2)
-                throw new MaestroException("Cannot move flight between two frozen flights");
-        }
-
-        // Push the landing time back if it's too close to a frozen flight in front of it
-        if (leader is not null && leader.State == State.Frozen)
-        {
-            var timeToLeader = proposedLandingTime - leader.ScheduledLandingTime;
-            if (timeToLeader < arrivalRate)
-            {
-                // Move target flight to be exactly the landing rate after the frozen leader
-                proposedLandingTime = leader.ScheduledLandingTime.Add(arrivalRate);
-            }
-        }
-
-        // Push the flight forward if it's too close to a frozen flight behind it
-        if (trailer is not null && trailer.State == State.Frozen)
-        {
-            var timeToTrailer = trailer.ScheduledLandingTime - proposedLandingTime;
-            if (timeToTrailer < arrivalRate)
-            {
-                // Move target flight to be exactly the landing rate before the frozen trailer
-                proposedLandingTime = trailer.ScheduledLandingTime.Subtract(arrivalRate);
-            }
-        }
-
-        return proposedLandingTime;
     }
 }

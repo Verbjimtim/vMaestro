@@ -4,11 +4,10 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:viewModels="clr-namespace:Maestro.Wpf.ViewModels"
-             xmlns:converters="clr-namespace:Maestro.Wpf.Converters"
              xmlns:views="clr-namespace:Maestro.Wpf.Views"
-             xmlns:configuration="clr-namespace:Maestro.Core.Configuration;assembly=Maestro.Core"
              xmlns:controls="clr-namespace:Maestro.Wpf.Controls"
              xmlns:local="clr-namespace:Maestro.Wpf"
+             Padding="{x:Static local:Theme.BeveledBorderThickness}"
              mc:Ignorable="d"
              d:DataContext="{d:DesignInstance Type=viewModels:FlightLabelViewModel}"
              d:DesignHeight="24"
@@ -18,11 +17,6 @@
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="/Maestro.Wpf;component/Styles.xaml" />
             </ResourceDictionary.MergedDictionaries>
-
-            <converters:MinutesConverter x:Key="MinutesConverter"/>
-            <converters:StateToColorConverter x:Key="StateToColorConverter"/>
-            <converters:DelayToColorConverter x:Key="DelayToColorConverter"/>
-            <converters:ViewModeToVisibilityConverter x:Key="ViewModeToVisibilityConverter"/>
 
             <Style TargetType="{x:Type TextBlock}" BasedOn="{StaticResource InteractiveTextStyle}" />
 
@@ -73,91 +67,70 @@
                 </controls:BeveledBorder.Style>
             </controls:BeveledBorder>
 
-            <StackPanel Orientation="Horizontal" Margin="{x:Static local:Theme.BeveledBorderThickness}">
-                <TextBlock
-                    Text="{Binding FlightViewModel.LandingTime, Converter={StaticResource MinutesConverter}}"
-                    Width="24"
-                    Visibility="{Binding ViewMode, RelativeSource={RelativeSource AncestorType={x:Type views:FlightLabelView}}, Converter={StaticResource ViewModeToVisibilityConverter}, ConverterParameter={x:Static configuration:ViewMode.Enroute}}"/>
-
-                <TextBlock
-                    Text="{Binding FlightViewModel.FeederFixTime, Converter={StaticResource MinutesConverter}}"
-                    Width="24"
-                    Visibility="{Binding ViewMode, RelativeSource={RelativeSource AncestorType={x:Type views:FlightLabelView}}, Converter={StaticResource ViewModeToVisibilityConverter}, ConverterParameter={x:Static configuration:ViewMode.Approach}}"/>
-
-                <TextBlock
-                    Text="{Binding FlightViewModel.AssignedRunway}"
-                    Width="32" />
-
-                <TextBlock
-                    Text="{Binding FlightViewModel.Callsign}"
-                    Foreground="{Binding FlightViewModel.State, Converter={StaticResource StateToColorConverter}}"
-                    Width="80"/>
-
-                <TextBlock
-                    Text="+"
-                    Foreground="{Binding FlightViewModel.State, Converter={StaticResource StateToColorConverter}}"
-                    Width="24">
-                    <TextBlock.Style>
-                        <Style TargetType="TextBlock">
-                            <Setter Property="Visibility" Value="Hidden"/>
-
-                            <Style.Triggers>
-                                <DataTrigger Binding="{Binding FlightViewModel.FlowControls}" Value="ProfileSpeed">
-                                    <Setter Property="Visibility" Value="Visible"/>
-                                </DataTrigger>
-                            </Style.Triggers>
-                        </Style>
-                    </TextBlock.Style>
-                </TextBlock>
-
-                <TextBlock
-                    Text="{Binding FlightViewModel.InitialDelay, Converter={StaticResource MinutesConverter}}"
-                    Foreground="{Binding FlightViewModel.InitialDelay, Converter={StaticResource DelayToColorConverter}}"
-                    Width="32"
-                    FlowDirection="LeftToRight" />
-
-                <TextBlock
-                    Text="{Binding FlightViewModel.RemainingDelay, Converter={StaticResource MinutesConverter}}"
-                    Foreground="{Binding FlightViewModel.RemainingDelay, Converter={StaticResource DelayToColorConverter}}"
-                    Width="32"
-                    FlowDirection="LeftToRight" />
-
-            </StackPanel>
+            <ItemsControl
+                ItemsSource="{Binding LabelItems}"
+                Margin="{x:Static local:Theme.BeveledBorderThickness}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock
+                            Text="{Binding PaddedText}"
+                            Foreground="{Binding Foreground}" />
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
         </Grid>
 
         <Border.ContextMenu>
             <ContextMenu Name="ContextMenu">
-                <MenuItem Header="Information" Command="{Binding ShowInformationWindowCommand}" />
-                <MenuItem Header="Recompute" Command="{Binding RecomputeCommand}" />
-                <MenuItem Header="Change Runway">
-                    <ItemsControl ItemsSource="{Binding RunwayModeViewModel.Runways}">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <MenuItem
-                                    Header="{Binding Identifier}"
-                                    Command="{Binding Path=DataContext.ChangeRunwayCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
-                                    CommandParameter="{Binding Identifier}" />
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
+                <MenuItem Header="Change Runway" ItemsSource="{Binding AvailableRunways}">
+                    <MenuItem.ItemContainerStyle>
+                        <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                            <Setter Property="Header" Value="{Binding .}"/>
+                            <Setter Property="Command" Value="{Binding Path=DataContext.ChangeRunwayCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                            <Setter Property="CommandParameter" Value="{Binding .}"/>
+                        </Style>
+                    </MenuItem.ItemContainerStyle>
                 </MenuItem>
-                <MenuItem Header="Insert Flight">
-                    <MenuItem Header="Before" Command="{Binding InsertFlightBeforeCommand}" IsEnabled="{Binding CanInsertBefore}"/>
-                    <MenuItem Header="After" Command="{Binding InsertFlightAfterCommand}"/>
+                <MenuItem Header="Change Approach Type" ItemsSource="{Binding AvailableApproachTypes}" Visibility="{Binding CanChangeApproachType, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <MenuItem.ItemContainerStyle>
+                        <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                            <Setter Property="Header" Value="{Binding .}"/>
+                            <Setter Property="Command" Value="{Binding Path=DataContext.ChangeApproachTypeCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                            <Setter Property="CommandParameter" Value="{Binding .}"/>
+                        </Style>
+                    </MenuItem.ItemContainerStyle>
                 </MenuItem>
                 <MenuItem Header="Insert Slot">
                     <MenuItem Header="Before" Command="{Binding InsertSlotBeforeCommand}"/>
                     <MenuItem Header="After" Command="{Binding InsertSlotAfterCommand}"/>
                 </MenuItem>
+                <MenuItem Header="Insert Flight">
+                    <MenuItem Header="Before" Command="{Binding InsertFlightBeforeCommand}" IsEnabled="{Binding CanInsertBefore}"/>
+                    <MenuItem Header="After" Command="{Binding InsertFlightAfterCommand}"/>
+                </MenuItem>
+                <MenuItem Header="Coordination" Command="{Binding CoordinationCommand}" />
                 <MenuItem Header="Change ETA FF" Command="{Binding ChangeEtaCommand}" />
+                <MenuItem Header="Information" Command="{Binding ShowInformationWindowCommand}" />
+                <MenuItem Header="Manual Delay">
+                    <MenuItem Header="00" Command="{Binding ManualDelayCommand}" CommandParameter="0"/>
+                    <MenuItem Header="05" Command="{Binding ManualDelayCommand}" CommandParameter="5"/>
+                    <MenuItem Header="10" Command="{Binding ManualDelayCommand}" CommandParameter="10"/>
+                    <MenuItem Header="15" Command="{Binding ManualDelayCommand}" CommandParameter="15"/>
+                    <MenuItem Header="20" Command="{Binding ManualDelayCommand}" CommandParameter="20"/>
+                </MenuItem>
                 <MenuItem Header="Remove" Command="{Binding RemoveCommand}" />
+                <MenuItem Header="Recompute" Command="{Binding RecomputeCommand}" />
                 <MenuItem Header="Desequence" Command="{Binding DesequenceCommand}" />
                 <MenuItem
                     Header="Make Pending"
                     Command="{Binding MakePendingCommand}"
                     Visibility="{Binding FlightViewModel.IsFromDepartureAirport, Converter={StaticResource BoolToVisibilityConverter}}" />
-                <MenuItem Header="Zero Delay" Command="{Binding ZeroDelayCommand}" />
-                <MenuItem Header="Coordination" Command="{Binding CoordinationCommand}" IsEnabled="False" />
+
             </ContextMenu>
         </Border.ContextMenu>
     </Border>

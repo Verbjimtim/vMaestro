@@ -1,36 +1,52 @@
-﻿using Maestro.Core.Messages;
+﻿using Maestro.Contracts.Flights;
+using Maestro.Core.Integration;
 using Maestro.Core.Model;
 
 namespace Maestro.Core.Extensions;
 
 public static class FlightExtensionMethods
 {
-    public static FlightMessage ToMessage(this Flight flight, Sequence sequence)
+    public static FlightDto ToDto(this Flight flight, Sequence sequence)
     {
-        return new FlightMessage
+        return new FlightDto
         {
             Callsign = flight.Callsign,
             AircraftType = flight.AircraftType,
+            AircraftCategory = flight.AircraftCategory,
             WakeCategory = flight.WakeCategory,
             OriginIdentifier = flight.OriginIdentifier,
-            EstimatedDepartureTime = flight.EstimatedDepartureTime,
             DestinationIdentifier = flight.DestinationIdentifier,
             IsFromDepartureAirport = flight.IsFromDepartureAirport,
+            EstimatedDepartureTime = flight.EstimatedDepartureTime,
             State = flight.State,
             NumberInSequence = sequence.NumberInSequence(flight),
             FeederFixIdentifier = flight.FeederFixIdentifier,
-            InitialFeederFixEstimate = flight.InitialFeederFixTime,
-            FeederFixEstimate = flight.EstimatedFeederFixTime,
-            FeederFixTime = flight.ScheduledFeederFixTime,
-            AssignedRunway = flight.AssignedRunwayIdentifier,
+            InitialFeederFixEstimate = flight.InitialFeederFixEstimate,
+            FeederFixEstimate = flight.FeederFixEstimate,
+            FeederFixTime = flight.FeederFixTime,
+            AssignedRunwayIdentifier = flight.AssignedRunwayIdentifier,
             NumberToLandOnRunway = sequence.NumberForRunway(flight),
-            InitialLandingEstimate = flight.InitialLandingTime,
-            LandingEstimate = flight.EstimatedLandingTime,
-            LandingTime = flight.ScheduledLandingTime,
+            InitialLandingEstimate = flight.InitialLandingEstimate,
+            LandingEstimate = flight.LandingEstimate,
+            TargetLandingTime = flight.TargetLandingTime,
+            LandingTime = flight.LandingTime,
             InitialDelay = flight.TotalDelay,
             RemainingDelay = flight.RemainingDelay,
             FlowControls = flight.FlowControls,
-            IsDummy = flight.IsDummy,
+            ActivatedTime = flight.ActivatedTime,
+            HighPriority = flight.HighPriority,
+            MaximumDelay = flight.MaximumDelay,
+            ManualFeederFixEstimate = flight.ManualFeederFixEstimate,
+            ApproachType = flight.ApproachType,
+            LastSeen = flight.LastSeen,
+            Position = flight.Position,
+            IsManuallyInserted = flight.IsManuallyInserted,
+            TimeToGo = flight.Trajectory.TimeToGo,
         };
+    }
+
+    public static AircraftPerformanceData GetPerformanceData(this Flight flight)
+    {
+        return new AircraftPerformanceData(flight.AircraftType, flight.AircraftCategory, flight.WakeCategory);
     }
 }

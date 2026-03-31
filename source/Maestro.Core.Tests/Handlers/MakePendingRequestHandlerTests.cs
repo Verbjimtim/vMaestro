@@ -1,6 +1,8 @@
+using Maestro.Contracts.Flights;
+using Maestro.Contracts.Shared;
 using Maestro.Core.Configuration;
 using Maestro.Core.Handlers;
-using Maestro.Core.Messages;
+using Maestro.Core.Hosting;
 using Maestro.Core.Model;
 using Maestro.Core.Tests.Builders;
 using Maestro.Core.Tests.Fixtures;
@@ -12,55 +14,74 @@ using Shouldly;
 
 namespace Maestro.Core.Tests.Handlers;
 
-public class MakePendingRequestHandlerTests(AirportConfigurationFixture airportConfigurationFixture, ClockFixture clockFixture)
+public class MakePendingRequestHandlerTests(ClockFixture clockFixture)
 {
-    readonly AirportConfiguration _airportConfiguration = airportConfigurationFixture.Instance;
+    const string DefaultRunway = "34L";
+    const int DefaultLandingRateSeconds = 180;
 
-    [Fact]
-    public async Task WhenMakingFlightPending_AllRequiredUpdatesArePerformed()
+    static AirportConfiguration CreateAirportConfiguration()
+    {
+        return new AirportConfigurationBuilder("YSSY")
+            .WithRunways(DefaultRunway)
+            .WithRunwayMode("DEFAULT", new RunwayConfiguration
+            {
+                Identifier = DefaultRunway,
+                LandingRateSeconds = DefaultLandingRateSeconds,
+                FeederFixes = []
+            })
+            .Build();
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task WhenMakingFlightPending_ItIsRemovedFromTheSequenceAndAddedToPendingList(bool highPriority)
     {
         // Arrange
         var now = clockFixture.Instance.UtcNow();
+
+        var airportConfiguration = CreateAirportConfiguration();
+
         var flight = new FlightBuilder("QFA123")
+            .FromDepartureAirport()
             .WithState(State.Stable)
             .WithLandingTime(now.AddMinutes(10))
             .WithLandingEstimate(now.AddMinutes(8))
-            .WithFeederFixTime(now.AddMinutes(5))
-            .WithFeederFixEstimate(now.AddMinutes(3))
+            .WithRunway(DefaultRunway)
+            .HighPriority(highPriority)
             .Build();
 
-        var sequence = new SequenceBuilder(_airportConfiguration)
-            .WithFlight(flight)
+        var (instanceManager, _, _, sequence) = new InstanceBuilder(airportConfiguration)
+            .WithSequence(s => s.WithFlight(flight))
             .Build();
 
-        var originalEstimate = flight.EstimatedLandingTime;
-        var originalFeederFixEstimate = flight.EstimatedFeederFixTime;
-        var originalScheduledTime = flight.ScheduledLandingTime;
-
-        var scheduler = Substitute.For<IScheduler>();
-        var handler = GetRequestHandler(sequence, scheduler);
+        var handler = GetRequestHandler(instanceManager, sequence);
         var request = new MakePendingRequest("YSSY", "QFA123");
 
         // Act
         await handler.Handle(request, CancellationToken.None);
 
         // Assert
-        flight.State.ShouldBe(State.Pending);
-        flight.EstimatedLandingTime.ShouldNotBe(originalEstimate);
-        flight.EstimatedFeederFixTime.ShouldNotBe(originalFeederFixEstimate);
-        flight.ScheduledLandingTime.ShouldNotBe(originalScheduledTime);
-        scheduler.Received(1).Schedule(sequence);
+        var instance = await instanceManager.GetInstance(sequence.AirportIdentifier, CancellationToken.None);
+        instance.Session.Sequence.FindFlight("QFA123").ShouldBeNull("flight should be removed from the sequence");
+
+        var pendingFlight = instance.Session.PendingFlights.SingleOrDefault(f => f.Callsign == "QFA123");
+        pendingFlight.ShouldNotBeNull();
+        pendingFlight.IsFromDepartureAirport.ShouldBeTrue();
+        pendingFlight.IsHighPriority.ShouldBe(highPriority);
     }
+
+    // TODO: Throw an error
 
     [Fact]
     public async Task WhenFlightNotFound_WarningIsLoggedAndHandlerReturns()
     {
         // Arrange
-        var sequence = new SequenceBuilder(_airportConfiguration)
-            .Build();
+        var airportConfiguration = CreateAirportConfiguration();
+        var (instanceManager, _, _, sequence) = new InstanceBuilder(airportConfiguration).Build();
 
         var logger = Substitute.For<ILogger>();
-        var handler = GetRequestHandler(sequence, logger: logger);
+        var handler = GetRequestHandler(instanceManager, sequence, logger: logger);
         var request = new MakePendingRequest("YSSY", "NONEXISTENT");
 
         // Act
@@ -70,12 +91,48 @@ public class MakePendingRequestHandlerTests(AirportConfigurationFixture airportC
         logger.Received(1).Warning("Flight {Callsign} not found for airport {AirportIdentifier}.", "NONEXISTENT", "YSSY");
     }
 
-    MakePendingRequestHandler GetRequestHandler(Sequence sequence, IScheduler? scheduler = null, ILogger? logger = null)
+    [Fact]
+    public async Task WhenFlightIsNotFromDepartureAirport_ExceptionIsThrown()
     {
-        var sequenceProvider = new MockSequenceProvider(sequence);
-        scheduler ??= Substitute.For<IScheduler>();
+        // Arrange
+        var now = clockFixture.Instance.UtcNow();
+
+        var airportConfiguration = CreateAirportConfiguration();
+
+        var flight = new FlightBuilder("QFA123")
+            .WithState(State.Stable)
+            .WithLandingTime(now.AddMinutes(10))
+            .WithLandingEstimate(now.AddMinutes(8))
+            .WithFeederFixTime(now.AddMinutes(5))
+            .WithFeederFixEstimate(now.AddMinutes(3))
+            .WithRunway(DefaultRunway)
+            .Build();
+
+        // Mark flight as NOT from departure airport
+        flight.IsFromDepartureAirport = false;
+
+        var (instanceManager, _, _, sequence) = new InstanceBuilder(airportConfiguration)
+            .WithSequence(s => s.WithClock(clockFixture.Instance).WithFlight(flight))
+            .Build();
+
+        var handler = GetRequestHandler(instanceManager, sequence);
+        var request = new MakePendingRequest("YSSY", "QFA123");
+
+        // Act & Assert
+        var exception = await Should.ThrowAsync<MaestroException>(async () =>
+            await handler.Handle(request, CancellationToken.None));
+
+        exception.Message.ShouldContain("departure airport", Case.Insensitive);
+    }
+
+    MakePendingRequestHandler GetRequestHandler(IMaestroInstanceManager instanceManager, Sequence sequence, ILogger? logger = null)
+    {
         var mediator = Substitute.For<IMediator>();
         logger ??= Substitute.For<ILogger>();
-        return new MakePendingRequestHandler(sequenceProvider, clockFixture.Instance, scheduler, mediator, logger);
+        return new MakePendingRequestHandler(
+            instanceManager,
+            new MockLocalConnectionManager(),
+            mediator,
+            logger);
     }
 }

@@ -14,16 +14,7 @@ public class Slot
     }
 
     public Guid Id { get; }
-    public DateTimeOffset StartTime { get; private set; }
-    public DateTimeOffset EndTime { get; private set; }
+    public DateTimeOffset StartTime { get; }
+    public DateTimeOffset EndTime { get; }
     public string[] RunwayIdentifiers { get; }
-
-    public void ChangeTime(DateTimeOffset newStartTime, DateTimeOffset newEndTime)
-    {
-        if (newStartTime >= newEndTime)
-            throw new MaestroException("Start time must be before end time.");
-
-        StartTime = newStartTime;
-        EndTime = newEndTime;
-    }
 }

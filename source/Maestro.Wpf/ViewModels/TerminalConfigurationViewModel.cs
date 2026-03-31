@@ -1,6 +1,8 @@
 ﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using Maestro.Core.Handlers;
+using Maestro.Contracts.Runway;
+using Maestro.Contracts.Sessions;
+using Maestro.Core.Configuration;
 using Maestro.Core.Infrastructure;
 using Maestro.Wpf.Integrations;
 using MediatR;
@@ -14,6 +16,8 @@ public partial class TerminalConfigurationViewModel : ObservableObject
     readonly IMediator _mediator;
     readonly IWindowHandle _windowHandle;
     readonly IErrorReporter _errorReporter;
+    readonly AirportConfiguration _airportConfiguration;
+    readonly WindDto _surfaceWind;
 
     [ObservableProperty]
     string _originalRunwayModeIdentifier;
@@ -25,6 +29,9 @@ public partial class TerminalConfigurationViewModel : ObservableObject
     RunwayModeViewModel _selectedRunwayMode;
 
     [ObservableProperty]
+    RunwayConfigurationItemViewModel[] _runwayConfigurationItems = [];
+
+    [ObservableProperty]
     bool _changeImmediately;
 
     [ObservableProperty]
@@ -33,19 +40,20 @@ public partial class TerminalConfigurationViewModel : ObservableObject
     [ObservableProperty]
     DateTimeOffset _firstLandingTime;
 
-    public RunwayModeDto[] AvailableRunwayModes { get; }
+    public RunwayModeViewModel[] AvailableRunwayModes { get; }
 
-    // TODO: Make configurable
     public double MinimumLandingRateSeconds => 30;
     public double MaximumLandingRateSeconds => 60 * 5; // 5 Minutes
 
     public TerminalConfigurationViewModel(
         string airportIdentifier,
-        RunwayModeDto[] availableRunwayModes,
-        RunwayModeDto currentRunwayMode,
-        RunwayModeDto? nextTerminalConfiguration,
+        RunwayModeViewModel[] availableRunwayModes,
+        RunwayModeViewModel currentRunwayMode,
+        RunwayModeViewModel? nextTerminalConfiguration,
         DateTimeOffset lastLandingTimeForOldMode,
         DateTimeOffset firstLandingTimeForNewMode,
+        AirportConfiguration airportConfiguration,
+        WindDto surfaceWind,
         IMediator mediator,
         IWindowHandle windowHandle,
         IClock clock,
@@ -56,15 +64,19 @@ public partial class TerminalConfigurationViewModel : ObservableObject
         _windowHandle = windowHandle;
         _clock = clock;
         _errorReporter = errorReporter;
+        _airportConfiguration = airportConfiguration;
+        _surfaceWind = surfaceWind;
 
         OriginalRunwayModeIdentifier = currentRunwayMode.Identifier;
 
         AvailableRunwayModes = availableRunwayModes;
-        SelectedRunwayMode = new RunwayModeViewModel(nextTerminalConfiguration ?? currentRunwayMode);
+        SelectedRunwayMode = nextTerminalConfiguration ?? currentRunwayMode;
         SelectedRunwayModeIdentifier = SelectedRunwayMode.Identifier;
 
         LastLandingTime = lastLandingTimeForOldMode;
         FirstLandingTime = firstLandingTimeForNewMode;
+
+        RunwayConfigurationItems = CreateRunwayConfigurationItems(SelectedRunwayMode);
     }
 
     partial void OnSelectedRunwayModeIdentifierChanged(string value)
@@ -74,7 +86,21 @@ public partial class TerminalConfigurationViewModel : ObservableObject
         if (template != null)
         {
             SelectedRunwayMode = new RunwayModeViewModel(template);
+            RunwayConfigurationItems = CreateRunwayConfigurationItems(SelectedRunwayMode);
         }
+    }
+
+    RunwayConfigurationItemViewModel[] CreateRunwayConfigurationItems(RunwayModeViewModel runwayMode)
+    {
+        return runwayMode.Runways
+            .Select(r => new RunwayConfigurationItemViewModel(
+                r.Identifier,
+                r.ApproachType,
+                r.LandingRateSeconds,
+                r.FeederFixes,
+                _airportConfiguration,
+                _surfaceWind))
+            .ToArray();
     }
 
     [RelayCommand]
@@ -84,15 +110,18 @@ public partial class TerminalConfigurationViewModel : ObservableObject
         {
             var runwayModeDto = new RunwayModeDto(
                 SelectedRunwayMode.Identifier,
-                SelectedRunwayMode.Runways
-                    .Select(r => new RunwayConfigurationDto(r.Identifier, r.LandingRateSeconds))
-                    .ToArray());
+                RunwayConfigurationItems.Select(r =>
+                    new RunwayDto(r.Identifier, r.ApproachType, r.LandingRateSeconds, r.FeederFixes)).ToArray(),
+                SelectedRunwayMode.DependencyRateSeconds,
+                SelectedRunwayMode.OffModeSeparationSeconds);
 
-            _mediator.Send(new ChangeRunwayModeRequest(
-                _airportIdentifier,
-                runwayModeDto,
-                LastLandingTime,
-                FirstLandingTime));
+            _mediator.Send(
+                new ChangeRunwayModeRequest(
+                    _airportIdentifier,
+                    runwayModeDto,
+                    LastLandingTime,
+                    FirstLandingTime),
+                CancellationToken.None);
 
             CloseWindow();
         }

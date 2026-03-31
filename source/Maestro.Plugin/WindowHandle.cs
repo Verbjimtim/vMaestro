@@ -3,17 +3,16 @@ using Maestro.Wpf.Integrations;
 
 namespace Maestro.Plugin;
 
-public class WindowHandle : IWindowHandle
+public class WindowHandle(VatSysForm form) : IWindowHandle
 {
-    Form? _form;
-    
-    public void Close()
+    public void Focus()
     {
-        _form?.Close();
+        form.WindowState = FormWindowState.Normal;
+        form.Activate();
     }
 
-    public void SetForm(Form form)
+    public void Close()
     {
-        _form = form;
+        form.ForceClose();
     }
 }

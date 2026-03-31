@@ -1,7 +1,7 @@
-﻿using System.Diagnostics;
-using System.Threading.Channels;
+﻿using System.Threading.Channels;
 using MediatR;
 using Serilog;
+using vatsys;
 
 namespace Maestro.Plugin.Infrastructure;
 
@@ -20,7 +20,7 @@ public class AsyncNotificationPublisher : INotificationPublisher, IAsyncDisposab
             SingleReader = true,
             SingleWriter = false
         });
-        
+
         _cancellationTokenSource = new CancellationTokenSource();
         _processTask = ProcessNotificationsAsync(_cancellationTokenSource.Token);
     }
@@ -34,26 +34,35 @@ public class AsyncNotificationPublisher : INotificationPublisher, IAsyncDisposab
         await _channel.Writer.WriteAsync(
             new NotificationWorkItem(handlerExecutors.ToArray(), notification),
             cancellationToken);
-        _logger.Debug("{NotificationType} published",
-            notification.GetType());
     }
 
     private async Task ProcessNotificationsAsync(CancellationToken cancellationToken)
     {
-        await foreach (var workItem in _channel.Reader.ReadAllAsync(cancellationToken))
+        await foreach (var workItem in _channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
         {
             try
             {
-                foreach (var notificationHandlerExecutor in workItem.Handlers)
+                // Process handlers in parallel so slow handlers don't block others
+                var tasks = workItem.Handlers.Select(async handler =>
                 {
-                    var sw = new Stopwatch();
-                    sw.Start();
-                    await notificationHandlerExecutor.HandlerCallback(workItem.Notification, cancellationToken);
-                    _logger.Debug("{HandlerType} handled {NotificationType} in {ElapsedMilliseconds}ms",
-                        notificationHandlerExecutor.HandlerInstance.GetType(),
-                        workItem.Notification.GetType(),
-                        sw.Elapsed);
-                }
+                    try
+                    {
+                        await handler.HandlerCallback(workItem.Notification, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Ignore cancellation for individual handlers
+                    }
+                    catch (Exception exception)
+                    {
+                        // Log error but don't stop processing other handlers
+                        _logger.Error(exception, "Failed to process notification {NotificationType} in handler {HandlerType}",
+                            workItem.Notification.GetType(), handler.GetType());
+                        Errors.Add(exception, Plugin.Name);
+                    }
+                });
+
+                await Task.WhenAll(tasks).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -61,8 +70,9 @@ public class AsyncNotificationPublisher : INotificationPublisher, IAsyncDisposab
             }
             catch (Exception exception)
             {
-                // Log error but continue processing other notifications
+                // This should rarely happen since individual handler errors are caught above
                 _logger.Error(exception, "Failed to process notification {NotificationType}", workItem.Notification.GetType());
+                Errors.Add(exception, Plugin.Name);
             }
         }
     }

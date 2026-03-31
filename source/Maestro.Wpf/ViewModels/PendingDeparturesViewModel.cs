@@ -1,8 +1,8 @@
 ﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Maestro.Contracts.Flights;
 using Maestro.Core.Extensions;
 using Maestro.Core.Infrastructure;
-using Maestro.Core.Messages;
 using Maestro.Wpf.Integrations;
 using MediatR;
 
@@ -20,10 +20,10 @@ public partial class PendingDeparturesViewModel : ObservableObject
     bool _isUpdatingFromSelection = false;
 
     [ObservableProperty]
-    FlightMessage[] _pendingFlights = [];
+    PendingFlightDto[] _pendingFlights = [];
 
     [ObservableProperty]
-    FlightMessage? _selectedFlight;
+    PendingFlightDto? _selectedFlight;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(InsertCommand))]
@@ -43,7 +43,7 @@ public partial class PendingDeparturesViewModel : ObservableObject
 
     public PendingDeparturesViewModel(
         string airportIdentifier,
-        FlightMessage[] pendingFlights,
+        PendingFlightDto[] pendingFlights,
         IWindowHandle windowHandle,
         IMediator mediator,
         IClock clock,
@@ -58,7 +58,7 @@ public partial class PendingDeparturesViewModel : ObservableObject
         TakeoffTime = clock.UtcNow().AddMinutes(5).Rounded();
     }
 
-    partial void OnSelectedFlightChanged(FlightMessage? value)
+    partial void OnSelectedFlightChanged(PendingFlightDto? value)
     {
         _isUpdatingFromSelection = true;
         Callsign = value?.Callsign ?? "";
@@ -96,12 +96,13 @@ public partial class PendingDeparturesViewModel : ObservableObject
     {
         try
         {
-            _mediator.Send(new InsertDepartureRequest(
-                _airportIdentifier,
-                Callsign,
-                AircraftType,
-                DepartureIdentifier,
-                TakeoffTime));
+            _mediator.Send(
+                new InsertFlightRequest(
+                    _airportIdentifier,
+                    Callsign,
+                    AircraftType,
+                    new DepartureInsertionOptions(DepartureIdentifier, TakeoffTime)),
+                CancellationToken.None);
             CloseWindow();
         }
         catch (Exception ex)

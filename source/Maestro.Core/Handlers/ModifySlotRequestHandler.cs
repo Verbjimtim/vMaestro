@@ -1,18 +1,48 @@
-﻿using Maestro.Core.Extensions;
-using Maestro.Core.Messages;
-using Maestro.Core.Model;
+﻿using Maestro.Contracts.Sessions;
+using Maestro.Contracts.Slots;
+using Maestro.Core.Connectivity;
+using Maestro.Core.Extensions;
+using Maestro.Core.Hosting;
 using MediatR;
+using Serilog;
 
 namespace Maestro.Core.Handlers;
 
-public class ModifySlotRequestHandler(ISequenceProvider sequenceProvider, IScheduler scheduler, IMediator mediator) : IRequestHandler<ModifySlotRequest>
+public class ModifySlotRequestHandler(
+    IMaestroInstanceManager instanceManager,
+    IMaestroConnectionManager connectionManager,
+    IMediator mediator,
+    ILogger logger)
+    : IRequestHandler<ModifySlotRequest>
 {
     public async Task Handle(ModifySlotRequest request, CancellationToken cancellationToken)
     {
-        using var lockedSequence = await sequenceProvider.GetSequence(request.AirportIdentifier, cancellationToken);
-        lockedSequence.Sequence.ModifySlot(request.SlotId, request.StartTime, request.EndTime, scheduler);
+        if (connectionManager.TryGetConnection(request.AirportIdentifier, out var connection) &&
+            connection.IsConnected &&
+            !connection.IsMaster)
+        {
+            logger.Information("Relaying ModifySlotRequest for {AirportIdentifier}", request.AirportIdentifier);
+            await connection.Invoke(request, cancellationToken);
+            return;
+        }
+
+        var instance = await instanceManager.GetInstance(request.AirportIdentifier, cancellationToken);
+        SessionDto sessionDto;
+
+        using (await instance.Semaphore.LockAsync(cancellationToken))
+        {
+            var sequence = instance.Session.Sequence;
+            sequence.ModifySlot(request.SlotId, request.StartTime, request.EndTime);
+
+            logger.Information("Slot {SlotId} modified for {AirportIdentifier} from {StartTime} to {EndTime}", request.SlotId, request.AirportIdentifier, request.StartTime, request.EndTime);
+
+            sessionDto = instance.Session.Snapshot();
+        }
+
         await mediator.Publish(
-            new SequenceUpdatedNotification(lockedSequence.Sequence.AirportIdentifier, lockedSequence.Sequence.ToMessage()),
+            new SessionUpdatedNotification(
+                instance.AirportIdentifier,
+                sessionDto),
             cancellationToken);
     }
 }

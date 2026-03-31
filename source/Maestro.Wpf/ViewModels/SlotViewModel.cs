@@ -1,6 +1,6 @@
 ﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using Maestro.Core.Messages;
+using Maestro.Contracts.Slots;
 using Maestro.Wpf.Integrations;
 using MediatR;
 
@@ -51,11 +51,15 @@ public partial class SlotViewModel : ObservableObject
         {
             if (_slotId is null)
             {
-                await _mediator.Send(new CreateSlotRequest(_airportIdentifier, StartTime, EndTime, _runwayIdentifiers));
+                await _mediator.Send(
+                    new CreateSlotRequest(_airportIdentifier, StartTime, EndTime, _runwayIdentifiers),
+                    CancellationToken.None);
             }
             else
             {
-                await _mediator.Send(new ModifySlotRequest(_airportIdentifier, _slotId.Value, StartTime, EndTime));
+                await _mediator.Send(
+                    new ModifySlotRequest(_airportIdentifier, _slotId.Value, StartTime, EndTime),
+                    CancellationToken.None);
             }
 
             _windowHandle.Close();
@@ -73,7 +77,9 @@ public partial class SlotViewModel : ObservableObject
         {
             if (_slotId is not null)
             {
-                await _mediator.Send(new DeleteSlotRequest(_airportIdentifier, _slotId.Value));
+                await _mediator.Send(
+                    new DeleteSlotRequest(_airportIdentifier, _slotId.Value),
+                    CancellationToken.None);
             }
 
             _windowHandle.Close();

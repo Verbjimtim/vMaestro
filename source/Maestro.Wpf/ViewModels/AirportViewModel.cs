@@ -1,46 +1,52 @@
-﻿using System.Collections.ObjectModel;
-using CommunityToolkit.Mvvm.ComponentModel;
+﻿using CommunityToolkit.Mvvm.ComponentModel;
+using Maestro.Contracts.Runway;
 using Maestro.Core.Configuration;
-using Maestro.Core.Handlers;
 
 namespace Maestro.Wpf.ViewModels;
-
-public partial class AirportViewModel(
-    string identifier,
-    RunwayModeViewModel[] runwayModes,
-    RunwayModeViewModel currentRunwayMode,
-    ViewConfiguration[] views)
-    : ObservableObject
-{
-    public string Identifier => identifier;
-
-    [ObservableProperty]
-    ObservableCollection<RunwayModeViewModel> _runwayModes = new(runwayModes);
-    
-    [ObservableProperty]
-    RunwayModeViewModel _currentRunwayMode = currentRunwayMode;
-
-    [ObservableProperty]
-    ObservableCollection<ViewConfiguration> _views = new(views);
-}
 
 public partial class RunwayModeViewModel : ObservableObject
 {
     [ObservableProperty]
     RunwayViewModel[] _runways = [];
-    
-    public RunwayModeViewModel(RunwayModeDto runwayModeDto)
-        : this(runwayModeDto.Identifier, runwayModeDto.Runways.Select(r => new RunwayViewModel(r)).ToArray())
+
+    public RunwayModeViewModel(RunwayModeConfiguration runwayModeConfiguration)
+        : this(
+            runwayModeConfiguration.Identifier,
+            runwayModeConfiguration.Runways.Select(r => new RunwayViewModel(r.Identifier, r.ApproachType, r.LandingRateSeconds, r.FeederFixes)).ToArray(),
+            runwayModeConfiguration.DependencyRateSeconds,
+            runwayModeConfiguration.OffModeSeparationSeconds)
     {
     }
-    
-    public RunwayModeViewModel(string identifier, RunwayViewModel[] runways)
+
+    public RunwayModeViewModel(RunwayModeDto runwayModeDto)
+        : this(
+            runwayModeDto.Identifier,
+            runwayModeDto.Runways.Select(r => new RunwayViewModel(r.Identifier, r.ApproachType, r.AcceptanceRateSeconds, r.FeederFixes)).ToArray(),
+            runwayModeDto.DependencyRateSeconds,
+            runwayModeDto.OffModeSeparationSeconds)
+    {
+    }
+
+    public RunwayModeViewModel(RunwayModeViewModel runwayModeViewModel)
+        : this(
+            runwayModeViewModel.Identifier,
+            runwayModeViewModel.Runways.Select(r => new RunwayViewModel(r.Identifier, r.ApproachType, r.LandingRateSeconds, r.FeederFixes)).ToArray(),
+            runwayModeViewModel.DependencyRateSeconds,
+            runwayModeViewModel.OffModeSeparationSeconds)
+    {
+    }
+
+    public RunwayModeViewModel(string identifier, RunwayViewModel[] runways, int dependencyRateSeconds, int offModeSeparationSeconds)
     {
         Identifier = identifier;
         Runways = runways;
+        DependencyRateSeconds = dependencyRateSeconds;
+        OffModeSeparationSeconds = offModeSeparationSeconds;
     }
-    
+
     public string Identifier { get; }
+    public int DependencyRateSeconds { get; }
+    public int OffModeSeparationSeconds { get; }
 }
 
 public partial class RunwayViewModel : ObservableObject
@@ -48,16 +54,41 @@ public partial class RunwayViewModel : ObservableObject
     [ObservableProperty]
     int _landingRateSeconds;
 
-    public RunwayViewModel(RunwayConfigurationDto runwayConfigurationDto)
-        : this(runwayConfigurationDto.RunwayIdentifier, runwayConfigurationDto.AcceptanceRate)
-    {
-    }
-
-    public RunwayViewModel(string identifier, int landingRateSeconds)
+    public RunwayViewModel(string identifier, string approachType, int landingRateSeconds, string[] feederFixes)
     {
         Identifier = identifier;
+        ApproachType = approachType;
         LandingRateSeconds = landingRateSeconds;
+        FeederFixes = feederFixes;
     }
-    
+
     public string Identifier { get; }
+    public string ApproachType { get; }
+    public string[] FeederFixes { get; }
+}
+
+public class RunwayIntervalViewModel
+{
+    public string Identifier { get; }
+    public string LandingRateDisplay { get; }
+
+    public RunwayIntervalViewModel(string identifier, string landingRateDisplay)
+    {
+        Identifier = identifier;
+        LandingRateDisplay = landingRateDisplay;
+    }
+}
+
+public class RunwayAchievedRateViewModel
+{
+    public string Identifier { get; }
+    public string AchievedRateDisplay { get; }
+    public string DeviationDisplay { get; }
+
+    public RunwayAchievedRateViewModel(string identifier, string achievedRateDisplay, string deviationDisplay)
+    {
+        Identifier = identifier;
+        AchievedRateDisplay = achievedRateDisplay;
+        DeviationDisplay = deviationDisplay;
+    }
 }
